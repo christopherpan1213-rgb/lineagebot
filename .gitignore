@@ -1,0 +1,24 @@
+# Executables
+*.exe
+*.zip
+
+# Screenshots & captures
+bot_screenshots/
+game_captures/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
