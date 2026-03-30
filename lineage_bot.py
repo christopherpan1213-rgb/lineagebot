@@ -331,23 +331,23 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
     center_x = cx + cw // 2
     center_y = cy + sh // 2
 
-    if mode == '遠程':
-        step = 65          # 更大步距覆蓋更遠
-        max_radius = min(cw, sh) * 2 // 3  # 2倍範圍
-        scan_delay = 0.015  # 15ms，更快
+    if mode in ('遠程', '定點'):
+        step = 75           # 更大步距加速掃描
+        max_radius = min(cw, sh) * 2 // 3
+        scan_delay = 0.005  # 5ms
     else:
-        step = 55
+        step = 65
         max_radius = min(cw, sh) // 3
-        scan_delay = 0.025  # 25ms
+        scan_delay = 0.008  # 8ms
 
     start_angle = random.uniform(0, 2 * math.pi)
     count = 0
 
-    # 半圈螺旋掃描
+    # 全圈螺旋掃描（360°）
     for radius in range(step, max_radius, step):
-        n_points = max(4, int(math.pi * radius / step))
+        n_points = max(6, int(2 * math.pi * radius / step))
         for i in range(n_points):
-            angle = start_angle + math.pi * i / n_points
+            angle = start_angle + 2 * math.pi * i / n_points
             px = int(center_x + radius * math.cos(angle))
             py = int(center_y + radius * math.sin(angle))
 
@@ -361,11 +361,15 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
             count += 1
 
             if get_cursor() != CURSOR_FINGER:
-                # 找到怪物！立刻按下+拖曳（不另外呼叫 attack）
+                # 找到怪物！
                 if log:
                     log(f"掃{count}點→打！({px},{py})")
 
-                # 瞬間按下
+                if mode == '定點':
+                    # 定點模式：不拖曳，只回傳座標讓主迴圈處理攻擊
+                    return (px, py)
+
+                # 其他模式：立刻按下+拖曳
                 game_down()
                 time.sleep(0.03)
 
@@ -491,7 +495,7 @@ def roam(cx, cy, cw, ch, hwnd, dist):
         return (tx, ty)
     ctypes.windll.user32.SetForegroundWindow(hwnd)
     time.sleep(0.05)
-    game_click()  # interception click
+    game_click(tx, ty)  # 帶座標點擊確保位置正確
     time.sleep(1.5 + random.uniform(0, 0.3))
     return None
 
@@ -623,7 +627,7 @@ class BotApp:
         self.var_roam_dist=tk.IntVar(value=200)
         self.var_stuck=tk.IntVar(value=20)
         self.var_pk_act=tk.StringVar(value='回城')
-        self.var_hotkey=tk.StringVar(value='page up')
+        self.var_hotkey=tk.StringVar(value='left windows')
 
         # 遠程
         self.var_rng_key=tk.StringVar(value='F1')
@@ -864,7 +868,7 @@ class BotApp:
         sf2=self._section(p,"快捷鍵 / 設定");sf2.pack(fill='x',padx=10,pady=5)
         r=self._frame(sf2);r.pack(fill='x',pady=2)
         self._lbl(r,"開始/停止鍵:").pack(side='left')
-        hks=['page up','page down','home','insert','pause','scroll lock']
+        hks=['left windows','right windows','page up','page down','home','insert','pause','scroll lock']
         c=self._combo(r,self.var_hotkey,hks,w=12);c.pack(side='left')
         c.bind('<<ComboboxSelected>>',lambda e:self._bind_hotkey())
         r=self._frame(sf2);r.pack(fill='x',pady=5)
@@ -883,7 +887,7 @@ class BotApp:
         p=self.pages['模式']
         sf=self._section(p,"掛機模式");sf.pack(fill='x',padx=10,pady=5)
         r=self._frame(sf);r.pack(fill='x',pady=3)
-        for m in ['近戰','遠程','召喚','隊伍']:
+        for m in ['近戰','遠程','定點','召喚','隊伍']:
             tk.Radiobutton(r,text=m,variable=self.var_mode,value=m,bg=BG2,fg=FG,
                            selectcolor=ACC2,activebackground=BG2,font=FONTS,
                            command=self._on_mode).pack(side='left',padx=6)
@@ -901,6 +905,12 @@ class BotApp:
         self._spin(r,self.var_rng_dist,50,400,inc=25).pack(side='left')
         self._lbl(r,"px").pack(side='left')
         self._chk(r,"風箏走位",self.var_rng_kite).pack(side='left',padx=8)
+        # 定點
+        f=self._section(p,"定點設定");self.mode_frames['定點']=f
+        r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
+        self._lbl(r,"攻擊鍵:").pack(side='left')
+        self._combo(r,self.var_rng_key,FKEYS,w=3).pack(side='left')
+        tk.Label(f,text="原地不動，只掃描射箭+喝水\n不移動、不撿物、不漫遊",bg=BG2,fg='#888',font=FONTS).pack(padx=6,pady=6)
         # 召喚
         f=self._section(p,"召喚設定");self.mode_frames['召喚']=f
         r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
@@ -1104,6 +1114,36 @@ class BotApp:
         dy = current[1] - self.minimap_anchor[1]
         return math.sqrt(dx*dx + dy*dy)
 
+    def _walk_back_to_anchor(self, cx, cy, cw, ch, hwnd):
+        """走回小地圖定點位置，每步重新偵測方向"""
+        if not hasattr(self, 'minimap_anchor') or self.minimap_anchor is None:
+            return False
+        sh_scene = int(ch * 0.75)
+        center_x = cx + cw // 2
+        center_y = cy + sh_scene // 2
+        for step in range(8):  # 最多走 8 步
+            cur = self._get_minimap_pos(cx, cy, cw, ch)
+            if cur is None:
+                return False
+            dx = self.minimap_anchor[0] - cur[0]
+            dy = self.minimap_anchor[1] - cur[1]
+            drift = math.sqrt(dx*dx + dy*dy)
+            if drift < 0.03:
+                self.log(f"已回到定點（{step}步）")
+                return True  # 到了
+            # 將小地圖差異換算為畫面上的點擊方向（小步走）
+            scale = min(200, max(80, int(drift * cw * 2)))
+            dd = max(0.001, drift)
+            back_x = center_x + int(dx / dd * scale)
+            back_y = center_y + int(dy / dd * scale)
+            back_x = max(cx + 50, min(cx + cw - 50, back_x))
+            back_y = max(cy + 50, min(cy + sh_scene - 50, back_y))
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            time.sleep(0.05)
+            game_click(back_x, back_y)
+            time.sleep(1.5)
+        return False
+
     def _check_survival(self, hwnd, cx, cy, cw, ch, timers):
         """生存系統：HP/MP/治療/喝水/Buff — 每次循環都呼叫"""
         now = time.time()
@@ -1116,6 +1156,12 @@ class BotApp:
                 self._bar(self.mp_cv, self.mp_tl, mp)
         except:
             pass
+        # debug：每 10 秒顯示 HP/MP 讀值，方便排查
+        if not hasattr(self, '_last_hp_debug'):
+            self._last_hp_debug = 0
+        if now - self._last_hp_debug > 10:
+            self.log(f"[HP={hp:.2f} MP={mp:.2f} 窗={cw}x{ch}]")
+            self._last_hp_debug = now
 
         # Buff（不需要 HP 值，定時觸發）
         if self.var_buff_en.get() and now - timers['buff'] > self.var_buff_sec.get():
@@ -1130,19 +1176,16 @@ class BotApp:
             self.buffs += 1
             self.log(f"喝綠水({key})")
 
-        if hp < 0:
-            return hp, mp
-
-        # 死亡
-        if hp <= 0.01:
+        # 死亡（僅在 HP 成功讀取時判定）
+        if hp >= 0 and hp <= 0.01:
             self.log("角色死亡！")
             alert('death')
             self.running = False
             self._status("死亡！", ACC)
             return hp, mp
 
-        # 緊急回城（最高優先）
-        if self.var_recall_en.get() and hp < self.var_recall_thr.get() / 100:
+        # 緊急回城（最高優先，僅在 HP 成功讀取時觸發）
+        if self.var_recall_en.get() and hp >= 0 and hp < self.var_recall_thr.get() / 100:
             ctypes.windll.user32.SetForegroundWindow(hwnd)
             press_key(self.var_recall_key.get())
             self.log(f"緊急回城！HP={hp*100:.0f}%")
@@ -1215,6 +1258,11 @@ class BotApp:
             sy = max(cy + 30, min(cy + sh - 30, my + int(dy / dd * d)))
             move_exact(sx, sy)
             game_click(sx, sy)
+        elif mode == '定點':
+            # 定點：按攻擊鍵 → 點擊怪物（不拖曳，避免角色走過去）
+            press_key(self.var_rng_key.get())
+            time.sleep(0.1)
+            game_click(mx, my)
         elif mode == '召喚':
             attack(mx, my, cx, cy, cw, ch)
             press_key(self.var_sum_atk.get())
@@ -1236,7 +1284,7 @@ class BotApp:
         mode = self.var_mode.get()
         if mode == '近戰':
             skills.use_next()
-        elif mode == '遠程':
+        elif mode in ('遠程', '定點'):
             press_key(self.var_rng_key.get())
         elif mode == '召喚':
             press_key(self.var_sum_atk.get())
@@ -1367,8 +1415,13 @@ class BotApp:
                 no_monster_count = 0
                 self._status(f"戰鬥({mode})", ACC)
 
-                # 遠程/召喚模式的額外技能
-                if mode == '遠程':
+                # 遠程/定點/召喚模式的額外技能
+                if mode == '定點':
+                    # 定點：先按攻擊鍵 → 再點擊怪物 → 拖曳維持自動攻擊
+                    press_key(self.var_rng_key.get())
+                    time.sleep(0.1)
+                    self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
+                elif mode == '遠程':
                     press_key(self.var_rng_key.get())
                 elif mode == '召喚':
                     press_key(self.var_sum_atk.get())
@@ -1438,8 +1491,14 @@ class BotApp:
                     self.log(f"擊殺！(#{self.kills})")
                     self._stats()
 
-                    # 快速撿物
-                    if self.var_loot.get() and self.running:
+                    # 定點模式：每 20 隻走回啟動位置
+                    if mode == '定點' and self.kills % 20 == 0 and self.running:
+                        self._status("回定點", '#f5a623')
+                        self.log(f"定點回歸（已殺 {self.kills} 隻）")
+                        self._walk_back_to_anchor(cx, cy, cw, ch, hwnd)
+
+                    # 快速撿物（定點模式不撿）
+                    if self.var_loot.get() and mode != '定點' and self.running:
                         for _ in range(2):
                             if not scan_loot(cx, cy, cw, ch, hwnd):
                                 break
@@ -1465,29 +1524,14 @@ class BotApp:
                 # ── 沒找到怪物 ──
                 no_monster_count += 1
 
-                if self.running and self.var_roam.get():
+                if self.running and self.var_roam.get() and mode != '定點':
                     # 用小地圖檢查偏移
                     drift = self._check_drift(cx, cy, cw, ch)
 
                     if drift > 0.15:  # 小地圖上偏移超過 15% = 走太遠
                         self._status(f"回定點", '#f5a623')
                         self.log(f"偏離定點({drift:.2f})，走回去")
-                        # 取得目前位置和定點位置的差異，往反方向走
-                        cur = self._get_minimap_pos(cx, cy, cw, ch)
-                        if cur and self.minimap_anchor:
-                            # 在畫面上往反方向點擊
-                            dx = self.minimap_anchor[0] - cur[0]
-                            dy = self.minimap_anchor[1] - cur[1]
-                            # 放大到畫面座標
-                            center_x = cx + cw // 2
-                            center_y = cy + sh_scene // 2
-                            back_x = center_x + int(dx * cw * 0.8)
-                            back_y = center_y + int(dy * ch * 0.8)
-                            back_x = max(cx + 50, min(cx + cw - 50, back_x))
-                            back_y = max(cy + 50, min(cy + sh_scene - 50, back_y))
-                            move_exact(back_x, back_y)
-                            game_click()
-                            time.sleep(2)
+                        self._walk_back_to_anchor(cx, cy, cw, ch, hwnd)
                         no_monster_count = 0
                     else:
                         # 正常漫遊
@@ -1495,8 +1539,9 @@ class BotApp:
                         self._status("搜索", '#aaa')
                         r = roam(cx, cy, cw, ch, hwnd, dist)
                         if r:
-                            self.log("漫遊發現怪物！")
-                            scan_and_attack(cx, cy, cw, ch, hwnd, self.log)
+                            mx, my = r
+                            self.log(f"漫遊發現怪物！({mx},{my})")
+                            self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
                             no_monster_count = 0
                 elif self.running:
                     time.sleep(1 + random.uniform(0, 0.5))
