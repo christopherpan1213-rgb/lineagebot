@@ -1,7 +1,10 @@
 """
-天堂經典版 Bot v9 — 核心引擎重構版
+天堂經典版 Bot v10 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
+BOT_VERSION = "10.1"
+GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
+UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
 ctypes.windll.shcore.SetProcessDpiAwareness(2)
 
@@ -331,12 +334,15 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
     center_x = cx + cw // 2
     center_y = cy + sh // 2
 
+    # 步距依視窗大小縮放（以 860px 寬為基準）
+    scale = min(cw, sh) / 860
+
     if mode in ('遠程', '定點'):
-        step = 75           # 更大步距加速掃描
+        step = max(30, int(75 * scale))
         max_radius = min(cw, sh) * 2 // 3
         scan_delay = 0.005  # 5ms
     else:
-        step = 65
+        step = max(25, int(65 * scale))
         max_radius = min(cw, sh) // 3
         scan_delay = 0.008  # 8ms
 
@@ -874,6 +880,13 @@ class BotApp:
         r=self._frame(sf2);r.pack(fill='x',pady=5)
         tk.Button(r,text="匯出設定",font=FONTS,bg=ACC2,fg='white',command=self._export_cfg).pack(side='left',padx=3)
         tk.Button(r,text="匯入設定",font=FONTS,bg=ACC2,fg='white',command=self._import_cfg).pack(side='left',padx=3)
+        tk.Button(r,text="檢查更新",font=FONTS,bg='#e67e22',fg='white',command=self._check_update).pack(side='left',padx=3)
+
+        # 版本顯示
+        r=self._frame(sf2);r.pack(fill='x',pady=2)
+        self._lbl(r,f"目前版本: v{BOT_VERSION}").pack(side='left')
+        self.update_lbl=tk.Label(r,text="",bg=BG2,fg='#2ecc71',font=FONTS)
+        self.update_lbl.pack(side='left',padx=8)
 
     def _export_cfg(self):
         fp=filedialog.asksaveasfilename(defaultextension='.json',filetypes=[('JSON','*.json')])
@@ -881,6 +894,74 @@ class BotApp:
     def _import_cfg(self):
         fp=filedialog.askopenfilename(filetypes=[('JSON','*.json')])
         if fp:import shutil;shutil.copy(fp,CONFIG_FILE);load_cfg(self);self.log("設定已匯入")
+
+    def _check_update(self):
+        """從 GitHub 檢查並下載更新"""
+        self.update_lbl.config(text="檢查中...", fg='#f39c12')
+        self.root.update()
+        threading.Thread(target=self._do_update, daemon=True).start()
+
+    def _do_update(self):
+        import urllib.request
+        base_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{UPDATE_BRANCH}"
+        files_to_update = ['lineage_bot.py', 'lineage_data.py']
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+
+        try:
+            # 1. 先檢查遠端版本
+            ver_url = f"{base_url}/lineage_bot.py"
+            req = urllib.request.Request(ver_url, headers={'User-Agent': 'LineageBot'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                remote_code = resp.read().decode('utf-8')
+
+            # 解析遠端版本號
+            remote_ver = BOT_VERSION
+            for line in remote_code.split('\n'):
+                if line.strip().startswith('BOT_VERSION'):
+                    remote_ver = line.split('=')[1].strip().strip('"').strip("'")
+                    break
+
+            if remote_ver == BOT_VERSION:
+                self.root.after(0, lambda: self.update_lbl.config(
+                    text=f"已是最新版 v{BOT_VERSION}", fg='#2ecc71'))
+                self.root.after(0, lambda: self.log("已是最新版本"))
+                return
+
+            # 2. 有新版本，下載所有檔案
+            updated = []
+            for fname in files_to_update:
+                try:
+                    url = f"{base_url}/{fname}"
+                    req = urllib.request.Request(url, headers={'User-Agent': 'LineageBot'})
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        content = resp.read()
+                    fpath = os.path.join(app_dir, fname)
+                    # 備份舊檔
+                    if os.path.exists(fpath):
+                        bak = fpath + '.bak'
+                        if os.path.exists(bak):
+                            os.remove(bak)
+                        os.rename(fpath, bak)
+                    with open(fpath, 'wb') as f:
+                        f.write(content)
+                    updated.append(fname)
+                except Exception as e:
+                    self.root.after(0, lambda e=e, f=fname: self.log(f"更新 {f} 失敗: {e}"))
+
+            if updated:
+                msg = f"已更新 v{remote_ver}（{', '.join(updated)}）\n請重啟程式生效"
+                self.root.after(0, lambda: self.update_lbl.config(
+                    text=f"v{BOT_VERSION} -> v{remote_ver} 請重啟", fg='#e74c3c'))
+                self.root.after(0, lambda: self.log(msg))
+                self.root.after(0, lambda: __import__('tkinter').messagebox.showinfo("更新完成", msg))
+            else:
+                self.root.after(0, lambda: self.update_lbl.config(
+                    text="更新失敗", fg='#e74c3c'))
+
+        except Exception as e:
+            self.root.after(0, lambda: self.update_lbl.config(
+                text="檢查失敗", fg='#e74c3c'))
+            self.root.after(0, lambda e=e: self.log(f"更新檢查失敗: {e}"))
 
     # ═══ 模式頁 ═══
     def _build_mode(self):
