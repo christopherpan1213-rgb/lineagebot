@@ -8,13 +8,13 @@ echo.
 
 set BOT_DIR=%~dp0
 cd /d "%BOT_DIR%"
+set BASE=https://raw.githubusercontent.com/christopherpan1213-rgb/lineagebot/main
+set DL=powershell -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; try{(New-Object Net.WebClient).DownloadFile('%BASE%/
 
-:: ── 1. 用 PowerShell 下載最新版 ──
-echo [1/3] 下載最新版程式...
+:: ── 1. 更新所有檔案（含 start.bat 自己）──
+echo [1/3] 下載最新版...
 
-powershell -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; try{(New-Object Net.WebClient).DownloadFile('https://raw.githubusercontent.com/christopherpan1213-rgb/lineagebot/main/lineage_bot.py','%BOT_DIR%lineage_bot.py');Write-Host '  lineage_bot.py OK'}catch{Write-Host '  lineage_bot.py 失敗:' $_.Exception.Message}"
-
-powershell -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; try{(New-Object Net.WebClient).DownloadFile('https://raw.githubusercontent.com/christopherpan1213-rgb/lineagebot/main/lineage_data.py','%BOT_DIR%lineage_data.py');Write-Host '  lineage_data.py OK'}catch{Write-Host '  lineage_data.py 失敗:' $_.Exception.Message}"
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $wc=New-Object Net.WebClient; $base='https://raw.githubusercontent.com/christopherpan1213-rgb/lineagebot/main'; $files=@('lineage_bot.py','lineage_data.py','start.bat','update.py'); foreach($f in $files){try{$wc.DownloadFile(\"$base/$f\",\"%BOT_DIR%$f.tmp\"); if((Get-Item \"%BOT_DIR%$f.tmp\").Length -gt 50){Copy-Item \"%BOT_DIR%$f.tmp\" \"%BOT_DIR%$f\" -Force; Remove-Item \"%BOT_DIR%$f.tmp\" -Force; Write-Host \"  $f OK\"}else{Remove-Item \"%BOT_DIR%$f.tmp\" -Force; Write-Host \"  $f 跳過\"}}catch{Write-Host \"  $f 失敗: $($_.Exception.Message)\"}}"
 
 echo.
 
