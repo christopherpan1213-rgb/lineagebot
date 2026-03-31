@@ -2,7 +2,7 @@
 天堂經典版 Bot v10 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "10.2"
+BOT_VERSION = "10.3"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -371,16 +371,15 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
                 if log:
                     log(f"掃{count}點→打！({px},{py})")
 
-                if mode == '定點':
-                    # 定點模式：不拖曳，只回傳座標讓主迴圈處理攻擊
-                    return (px, py)
-
-                # 其他模式：立刻按下+拖曳
+                # 立刻按下+拖曳
                 game_down()
                 time.sleep(0.03)
 
-                # 快速往下拖 150-300px
-                drag_dist = random.randint(150, 300)
+                # 定點模式短拖曳（30-60px），其他模式長拖曳（150-300px）
+                if mode == '定點':
+                    drag_dist = random.randint(30, 60)
+                else:
+                    drag_dist = random.randint(150, 300)
                 drag_x = px + random.randint(-20, 20)
                 drag_y = min(cy + sh - 20, py + drag_dist)
 
@@ -1346,10 +1345,20 @@ class BotApp:
             move_exact(sx, sy)
             game_click(sx, sy)
         elif mode == '定點':
-            # 定點：按攻擊鍵 → 點擊怪物（不拖曳，避免角色走過去）
+            # 定點：按攻擊鍵 → 點擊怪物 + 短拖曳（30-60px，不會走過去）
             press_key(self.var_rng_key.get())
             time.sleep(0.1)
-            game_click(mx, my)
+            move_exact(mx, my)
+            time.sleep(0.05)
+            game_down()
+            time.sleep(0.03)
+            drag_y = my + random.randint(30, 60)
+            drag_x = mx + random.randint(-15, 15)
+            for s in range(1, 4):
+                move_exact(mx + (drag_x - mx) * s // 3, my + (drag_y - my) * s // 3)
+                time.sleep(0.015)
+            time.sleep(0.03)
+            game_up()
         elif mode == '召喚':
             attack(mx, my, cx, cy, cw, ch)
             press_key(self.var_sum_atk.get())
@@ -1504,9 +1513,7 @@ class BotApp:
 
                 # 遠程/定點/召喚模式的額外技能
                 if mode == '定點':
-                    # 定點：先按攻擊鍵 → 再點擊怪物 → 拖曳維持自動攻擊
-                    press_key(self.var_rng_key.get())
-                    time.sleep(0.1)
+                    # 定點：先按攻擊鍵 → 再點擊怪物+短拖曳
                     self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
                 elif mode == '遠程':
                     press_key(self.var_rng_key.get())
