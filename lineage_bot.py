@@ -2,7 +2,7 @@
 天堂經典版 Bot v10 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "10.8"
+BOT_VERSION = "10.9"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -588,7 +588,7 @@ FONT=('Microsoft JhengHei',9); FONTS=('Microsoft JhengHei',8); FONTM=('Consolas'
 class BotApp:
     def __init__(self):
         self.root=tk.Tk()
-        self.root.title("天堂經典版 Bot v8")
+        self.root.title(f"天堂經典版 Bot v{BOT_VERSION}")
         self.root.geometry("680x620")
         self.root.configure(bg=BG1)
         self.root.attributes('-topmost',True)
@@ -960,15 +960,26 @@ class BotApp:
                     req = urllib.request.Request(url, headers={'User-Agent': 'LineageBot'})
                     with urllib.request.urlopen(req, timeout=15) as resp:
                         content = resp.read()
+                    if len(content) < 100:
+                        continue
                     fpath = os.path.join(app_dir, fname)
-                    # 備份舊檔
-                    if os.path.exists(fpath):
-                        bak = fpath + '.bak'
-                        if os.path.exists(bak):
-                            os.remove(bak)
-                        os.rename(fpath, bak)
-                    with open(fpath, 'wb') as f:
+                    # 先寫到暫存檔，再覆蓋（避免檔案鎖定問題）
+                    tmp = fpath + '.new'
+                    with open(tmp, 'wb') as f:
                         f.write(content)
+                    # 備份舊檔
+                    try:
+                        bak = fpath + '.bak'
+                        import shutil
+                        shutil.copy2(fpath, bak)
+                    except:
+                        pass
+                    # 覆蓋（程式執行中也能寫入，重啟後生效）
+                    try:
+                        os.replace(tmp, fpath)
+                    except:
+                        shutil.copy2(tmp, fpath)
+                        os.remove(tmp)
                     updated.append(fname)
                 except Exception as e:
                     self.root.after(0, lambda e=e, f=fname: self.log(f"更新 {f} 失敗: {e}"))
