@@ -2,7 +2,7 @@
 天堂經典版 Bot v10 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "10.3"
+BOT_VERSION = "10.4"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -340,11 +340,11 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
     if mode in ('遠程', '定點'):
         step = max(30, int(75 * scale))
         max_radius = min(cw, sh) * 2 // 3
-        scan_delay = 0.002  # 2ms
+        scan_delay = 0.01   # 10ms — 太快遊戲來不及更新游標
     else:
         step = max(25, int(65 * scale))
         max_radius = min(cw, sh) // 3
-        scan_delay = 0.003  # 3ms
+        scan_delay = 0.015  # 15ms
 
     start_angle = random.uniform(0, 2 * math.pi)
     count = 0
@@ -371,25 +371,27 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
                 if log:
                     log(f"掃{count}點→打！({px},{py})")
 
-                # 立刻按下+拖曳
+                # 按下+拖曳攻擊
+                time.sleep(0.05)  # 讓遊戲確認游標在怪物上
                 game_down()
-                time.sleep(0.03)
+                time.sleep(0.08)  # 等遊戲註冊按下事件
 
-                # 定點模式短拖曳（30-60px），其他模式長拖曳（150-300px）
+                # 定點模式短拖曳（40-80px），其他模式長拖曳（150-300px）
                 if mode == '定點':
-                    drag_dist = random.randint(30, 60)
+                    drag_dist = random.randint(40, 80)
                 else:
                     drag_dist = random.randint(150, 300)
-                drag_x = px + random.randint(-20, 20)
+                drag_x = px + random.randint(-15, 15)
                 drag_y = min(cy + sh - 20, py + drag_dist)
 
-                for s in range(1, 5):
+                steps = 5
+                for s in range(1, steps + 1):
                     move_exact(
-                        px + (drag_x - px) * s // 4,
-                        py + (drag_y - py) * s // 4)
-                    time.sleep(0.015)
+                        px + (drag_x - px) * s // steps,
+                        py + (drag_y - py) * s // steps)
+                    time.sleep(0.02)
 
-                time.sleep(0.03)
+                time.sleep(0.05)
                 game_up()
 
                 return (px, py)
@@ -661,7 +663,14 @@ class BotApp:
     def _bind_hotkey(self):
         try:keyboard.remove_all_hotkeys()
         except:pass
-        keyboard.add_hotkey(self.var_hotkey.get(),lambda:self.root.after(0,self._toggle))
+        key = self.var_hotkey.get()
+        # Windows 鍵在 keyboard 庫中的名稱
+        if key == 'left windows':
+            keyboard.on_press_key(0x5B, lambda e: self.root.after(0, self._toggle), suppress=False)
+        elif key == 'right windows':
+            keyboard.on_press_key(0x5C, lambda e: self.root.after(0, self._toggle), suppress=False)
+        else:
+            keyboard.add_hotkey(key, lambda: self.root.after(0, self._toggle))
 
     def _close(self):
         save_cfg(self);self.running=False;self.root.destroy()
@@ -1345,19 +1354,19 @@ class BotApp:
             move_exact(sx, sy)
             game_click(sx, sy)
         elif mode == '定點':
-            # 定點：按攻擊鍵 → 點擊怪物 + 短拖曳（30-60px，不會走過去）
+            # 定點：按攻擊鍵 → 移到怪物 → 按住 → 短拖曳 → 放開
             press_key(self.var_rng_key.get())
             time.sleep(0.1)
             move_exact(mx, my)
-            time.sleep(0.05)
+            time.sleep(0.08)
             game_down()
-            time.sleep(0.03)
-            drag_y = my + random.randint(30, 60)
+            time.sleep(0.08)
+            drag_y = my + random.randint(40, 80)
             drag_x = mx + random.randint(-15, 15)
-            for s in range(1, 4):
-                move_exact(mx + (drag_x - mx) * s // 3, my + (drag_y - my) * s // 3)
-                time.sleep(0.015)
-            time.sleep(0.03)
+            for s in range(1, 5):
+                move_exact(mx + (drag_x - mx) * s // 4, my + (drag_y - my) * s // 4)
+                time.sleep(0.02)
+            time.sleep(0.05)
             game_up()
         elif mode == '召喚':
             attack(mx, my, cx, cy, cw, ch)
