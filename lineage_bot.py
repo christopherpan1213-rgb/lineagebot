@@ -2,7 +2,7 @@
 天堂經典版 Bot v10 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "10.1"
+BOT_VERSION = "10.2"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -340,11 +340,11 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
     if mode in ('遠程', '定點'):
         step = max(30, int(75 * scale))
         max_radius = min(cw, sh) * 2 // 3
-        scan_delay = 0.005  # 5ms
+        scan_delay = 0.002  # 2ms
     else:
         step = max(25, int(65 * scale))
         max_radius = min(cw, sh) // 3
-        scan_delay = 0.008  # 8ms
+        scan_delay = 0.003  # 3ms
 
     start_angle = random.uniform(0, 2 * math.pi)
     count = 0
@@ -1275,8 +1275,10 @@ class BotApp:
             time.sleep(5)
             return hp, mp
 
-        # 治癒術（HP 低於閾值，或 HP 讀取失敗時每 10 秒補一次）
-        heal_trigger = (hp >= 0 and hp < self.var_heal_thr.get() / 100) or (hp < 0 and now - timers['heal'] > 10)
+        # 治癒術（HP 低於閾值 / 讀取失敗每 10 秒 / HP=1.0 疑似讀錯每 15 秒保底）
+        heal_trigger = (hp >= 0 and hp < self.var_heal_thr.get() / 100) \
+                       or (hp < 0 and now - timers['heal'] > 10) \
+                       or (hp >= 0.99 and now - timers['heal'] > 15)
         if self.var_heal_en.get() and heal_trigger and now - timers['heal'] > 2:
             ctypes.windll.user32.SetForegroundWindow(hwnd)
             time.sleep(0.1)
@@ -1287,8 +1289,10 @@ class BotApp:
             timers['heal'] = now
             self.heals += 1
 
-        # 紅水（HP 低於閾值，或 HP 讀取失敗時每 5 秒喝一次）
-        hp_trigger = (hp >= 0 and hp < self.var_hp_thr.get() / 100) or (hp < 0 and now - timers['hp'] > 5)
+        # 紅水（HP 低於閾值 / HP 讀取失敗每 5 秒 / HP=1.0 疑似讀錯每 8 秒保底）
+        hp_trigger = (hp >= 0 and hp < self.var_hp_thr.get() / 100) \
+                     or (hp < 0 and now - timers['hp'] > 5) \
+                     or (hp >= 0.99 and now - timers['hp'] > 8)
         if self.var_hp_en.get() and hp_trigger and now - timers['hp'] > 1.5:
             ctypes.windll.user32.SetForegroundWindow(hwnd)
             time.sleep(0.1)
@@ -1297,8 +1301,10 @@ class BotApp:
             timers['hp'] = now
             self.pots += 1
 
-        # 藍水
-        mp_trigger = (mp >= 0 and mp < self.var_mp_thr.get() / 100) or (mp < 0 and now - timers['mp'] > 8)
+        # 藍水（同樣加保底：MP=1.0 疑似讀錯每 10 秒喝）
+        mp_trigger = (mp >= 0 and mp < self.var_mp_thr.get() / 100) \
+                     or (mp < 0 and now - timers['mp'] > 8) \
+                     or (mp >= 0.99 and now - timers['mp'] > 10)
         if self.var_mp_en.get() and mp_trigger and now - timers['mp'] > 3:
             ctypes.windll.user32.SetForegroundWindow(hwnd)
             time.sleep(0.1)
