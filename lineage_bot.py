@@ -2,7 +2,7 @@
 天堂經典版 Bot v10 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "10.4"
+BOT_VERSION = "10.5"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -376,11 +376,8 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
                 game_down()
                 time.sleep(0.08)  # 等遊戲註冊按下事件
 
-                # 定點模式短拖曳（40-80px），其他模式長拖曳（150-300px）
-                if mode == '定點':
-                    drag_dist = random.randint(40, 80)
-                else:
-                    drag_dist = random.randint(150, 300)
+                # 所有模式統一拖曳距離（150-300px），天堂需要拖夠遠才觸發攻擊
+                drag_dist = random.randint(150, 300)
                 drag_x = px + random.randint(-15, 15)
                 drag_y = min(cy + sh - 20, py + drag_dist)
 
@@ -1354,14 +1351,14 @@ class BotApp:
             move_exact(sx, sy)
             game_click(sx, sy)
         elif mode == '定點':
-            # 定點：按攻擊鍵 → 移到怪物 → 按住 → 短拖曳 → 放開
+            # 定點：按攻擊鍵 → 移到怪物 → 按住 → 拖曳 → 放開
             press_key(self.var_rng_key.get())
             time.sleep(0.1)
             move_exact(mx, my)
             time.sleep(0.08)
             game_down()
             time.sleep(0.08)
-            drag_y = my + random.randint(40, 80)
+            drag_y = my + random.randint(150, 300)
             drag_x = mx + random.randint(-15, 15)
             for s in range(1, 5):
                 move_exact(mx + (drag_x - mx) * s // 4, my + (drag_y - my) * s // 4)
