@@ -2,7 +2,7 @@
 天堂經典版 Bot v10 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "10.6"
+BOT_VERSION = "10.7"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -905,13 +905,13 @@ class BotApp:
         r=self._frame(sf2);r.pack(fill='x',pady=5)
         tk.Button(r,text="匯出設定",font=FONTS,bg=ACC2,fg='white',command=self._export_cfg).pack(side='left',padx=3)
         tk.Button(r,text="匯入設定",font=FONTS,bg=ACC2,fg='white',command=self._import_cfg).pack(side='left',padx=3)
-        tk.Button(r,text="檢查更新",font=FONTS,bg='#e67e22',fg='white',command=self._check_update).pack(side='left',padx=3)
 
-        # 版本顯示
-        r=self._frame(sf2);r.pack(fill='x',pady=2)
-        self._lbl(r,f"目前版本: v{BOT_VERSION}").pack(side='left')
+        # 更新（獨立一行）
+        r=self._frame(sf2);r.pack(fill='x',pady=5)
+        tk.Button(r,text=">>> 檢查更新 <<<",font=('Microsoft JhengHei',10,'bold'),bg='#e67e22',fg='white',command=self._check_update).pack(side='left',padx=3)
+        self._lbl(r,f"v{BOT_VERSION}").pack(side='left',padx=8)
         self.update_lbl=tk.Label(r,text="",bg=BG2,fg='#2ecc71',font=FONTS)
-        self.update_lbl.pack(side='left',padx=8)
+        self.update_lbl.pack(side='left',padx=4)
 
     def _export_cfg(self):
         fp=filedialog.asksaveasfilename(defaultextension='.json',filetypes=[('JSON','*.json')])
