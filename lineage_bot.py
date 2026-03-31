@@ -2,7 +2,7 @@
 天堂經典版 Bot v10 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "10.5"
+BOT_VERSION = "10.6"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -650,6 +650,12 @@ class BotApp:
         self.var_sk=[tk.StringVar(value='無') for _ in range(7)]
         self.var_cd=[tk.DoubleVar(value=3.0) for _ in range(7)]
 
+        # 定時按鍵 (4組)
+        self.var_timer_en=[tk.BooleanVar(value=False) for _ in range(4)]
+        self.var_timer_key=[tk.StringVar(value='無') for _ in range(4)]
+        self.var_timer_sec=[tk.DoubleVar(value=10.0) for _ in range(4)]
+        self.var_timer_cnt=[tk.IntVar(value=1) for _ in range(4)]
+
         # 回城補給方案 (3套)
         self.var_supply=[tk.StringVar(value='紅水100個') for _ in range(3)]
 
@@ -860,6 +866,20 @@ class BotApp:
             self._lbl(r,"冷卻:").pack(side='left',padx=(8,1))
             self._spin(r,self.var_cd[i],0.5,30,w=4,inc=0.5).pack(side='left')
             self._lbl(r,"秒").pack(side='left')
+
+        # 定時按鍵
+        sf2=self._section(p,"定時按鍵（掛機時自動按）");sf2.pack(fill='x',padx=10,pady=5)
+        for i in range(4):
+            r=self._frame(sf2);r.pack(fill='x',pady=2)
+            self._chk(r,f"#{i+1}",self.var_timer_en[i]).pack(side='left')
+            self._lbl(r,"按鍵:").pack(side='left',padx=(4,1))
+            self._combo(r,self.var_timer_key[i],['無']+FKEYS+['1','2','3','4','5','6','7','8','9','0'],w=3).pack(side='left',padx=2)
+            self._lbl(r,"每").pack(side='left',padx=(6,1))
+            self._spin(r,self.var_timer_sec[i],1,3600,w=5,inc=1).pack(side='left')
+            self._lbl(r,"秒").pack(side='left')
+            self._lbl(r,"按").pack(side='left',padx=(6,1))
+            self._spin(r,self.var_timer_cnt[i],1,10,w=2).pack(side='left')
+            self._lbl(r,"下").pack(side='left')
 
     # ═══ 安全頁 ═══
     def _build_safety(self):
@@ -1326,6 +1346,27 @@ class BotApp:
             press_key(self.var_sum_key.get())
             timers['summon'] = now
             self.log("重召喚")
+
+        # 定時按鍵（4 組）
+        for i in range(4):
+            if not self.var_timer_en[i].get():
+                continue
+            tkey = self.var_timer_key[i].get()
+            if tkey == '無':
+                continue
+            timer_name = f'timer_{i}'
+            if timer_name not in timers:
+                timers[timer_name] = 0
+            interval = self.var_timer_sec[i].get()
+            if now - timers[timer_name] > interval:
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+                time.sleep(0.1)
+                cnt = self.var_timer_cnt[i].get()
+                for _ in range(cnt):
+                    press_key(tkey)
+                    time.sleep(0.15)
+                timers[timer_name] = now
+                self.log(f"定時按鍵#{i+1}: {tkey} x{cnt}")
 
         self._stats()
         return hp, mp
