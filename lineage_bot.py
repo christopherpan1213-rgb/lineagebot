@@ -2,7 +2,7 @@
 天堂經典版 Bot v12 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "12.7"
+BOT_VERSION = "12.8"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -758,8 +758,11 @@ class BotApp:
         self.var_loot=tk.BooleanVar(value=False)
         self.var_ocr_en=tk.BooleanVar(value=True)  # OCR 偵測開關
         self.var_hp_en=tk.BooleanVar(value=True)
+        self.var_hp_sec=tk.IntVar(value=8)       # 定時喝紅水秒數
         self.var_mp_en=tk.BooleanVar(value=False)
+        self.var_mp_sec=tk.IntVar(value=10)      # 定時喝藍水秒數
         self.var_heal_en=tk.BooleanVar(value=True)
+        self.var_heal_sec=tk.IntVar(value=15)    # 定時治癒術秒數
         self.var_buff_en=tk.BooleanVar(value=True)
         self.var_recall_en=tk.BooleanVar(value=False)
         self.var_antipk=tk.BooleanVar(value=False)
@@ -1016,6 +1019,19 @@ class BotApp:
         # OCR 開關
         r=self._frame(p);r.pack(fill='x',padx=10,pady=3)
         self._chk(r,"HP/MP OCR偵測（關閉=定時喝水）",self.var_ocr_en).pack(side='left')
+
+        # 定時喝水秒數（OCR 關閉時使用）
+        sf_timer=self._section(p,"定時喝水（OCR關閉時）");sf_timer.pack(fill='x',padx=10,pady=3)
+        r=self._frame(sf_timer);r.pack(fill='x',pady=2)
+        self._lbl(r,"紅水 每").pack(side='left')
+        self._spin(r,self.var_hp_sec,3,60,w=3,inc=1).pack(side='left')
+        self._lbl(r,"秒").pack(side='left')
+        self._lbl(r,"   藍水 每").pack(side='left')
+        self._spin(r,self.var_mp_sec,3,60,w=3,inc=1).pack(side='left')
+        self._lbl(r,"秒").pack(side='left')
+        self._lbl(r,"   治癒 每").pack(side='left')
+        self._spin(r,self.var_heal_sec,3,60,w=3,inc=1).pack(side='left')
+        self._lbl(r,"秒").pack(side='left')
 
         mkrow("紅水(HP)",self.var_hp_en,self.var_hp_key,self.var_hp_thr)
         mkrow("藍水(MP)",self.var_mp_en,self.var_mp_key,self.var_mp_thr)
@@ -1597,9 +1613,9 @@ class BotApp:
             time.sleep(5)
             return hp, mp
 
-        # 治癒術（HP 低於閾值 / 讀取失敗每 10 秒保底）
+        # 治癒術（HP 低於閾值 / OCR 關閉時定時施放）
         heal_trigger = (hp >= 0 and hp < self.var_heal_thr.get() / 100) \
-                       or (hp < 0 and now - timers['heal'] > 10)
+                       or (bars._hp_max == 0 and now - timers['heal'] > self.var_heal_sec.get())
         if self.var_heal_en.get() and heal_trigger and now - timers['heal'] > 3:
             k = self.var_heal_key.get()
             for _ in range(self.var_heal_n.get()):
@@ -1616,7 +1632,7 @@ class BotApp:
         if hp_max > 0:
             need_hp = hp_cur < hp_max * hp_thr and hp_cur > 0
         else:
-            need_hp = now - timers['hp'] > 8  # OCR 沒讀到，每 8 秒保底喝一次
+            need_hp = now - timers['hp'] > self.var_hp_sec.get()
         if self.var_hp_en.get() and need_hp and now - timers['hp'] > 4:
             k = self.var_hp_key.get()
             self._click_hotbar(cx, cy, cw, ch, k)
@@ -1634,7 +1650,7 @@ class BotApp:
         if mp_max > 0:
             need_mp = mp_cur < mp_max * mp_thr and mp_cur > 0
         else:
-            need_mp = now - timers['mp'] > 10
+            need_mp = now - timers['mp'] > self.var_mp_sec.get()
         if self.var_mp_en.get() and need_mp and now - timers['mp'] > 4:
             k = self.var_mp_key.get()
             self._click_hotbar(cx, cy, cw, ch, k)
