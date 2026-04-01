@@ -2,7 +2,7 @@
 天堂經典版 Bot v12 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "12.4"
+BOT_VERSION = "12.6"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -257,13 +257,15 @@ class BarReader:
             frame = grab_region(cx + bx, cy + by, bw, bh)
             if frame is None or frame.size == 0:
                 return ""
-            big = cv2.resize(frame, None, fx=8, fy=8, interpolation=cv2.INTER_LINEAR)
+            # 根據圖片大小決定放大倍率（太大會卡 OCR）
+            scale = max(2, min(6, 800 // max(frame.shape[0], 1)))
+            big = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
             tmp = os.path.join(os.environ.get('TEMP', '.'), '_ocr_tmp.png')
             cv2.imwrite(tmp, big)
             import subprocess
             r = subprocess.run(
                 ['powershell', '-ExecutionPolicy', 'Bypass', '-File', self._ocr_script, tmp],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, timeout=8
             )
             try: os.remove(tmp)
             except: pass
@@ -295,7 +297,8 @@ class BarReader:
         """自動搜尋 HP/MP 條位置 — 只截一次大圖 OCR"""
         try:
             # 截底部 25% 整張，一次 OCR 找 HP 和 MP
-            text = self._ocr_region(cx, cy, cw, ch, 0.0, 1.0, 0.75, 0.25)
+            # 只截中間 60% 寬度的底部 20%（避免截太大卡住 OCR）
+            text = self._ocr_region(cx, cy, cw, ch, 0.20, 0.60, 0.78, 0.18)
             if not text:
                 return False
             import re
@@ -321,7 +324,8 @@ class BarReader:
     def _bg_ocr(self, cx, cy, cw, ch):
         """背景執行緒：一次 OCR 底部 25%，同時讀 HP 和 MP"""
         try:
-            text = self._ocr_region(cx, cy, cw, ch, 0.0, 1.0, 0.75, 0.25)
+            # 只截中間 60% 寬度的底部 20%（避免截太大卡住 OCR）
+            text = self._ocr_region(cx, cy, cw, ch, 0.20, 0.60, 0.78, 0.18)
             if text:
                 self._last_ocr_text = text
                 import re
