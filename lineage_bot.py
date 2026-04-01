@@ -231,6 +231,10 @@ class BarReader:
         self.ok = True
         self._hp_ratio = 1.0
         self._mp_ratio = 1.0
+        self._hp_cur = 0    # 目前 HP
+        self._hp_max = 0    # 最大 HP
+        self._mp_cur = 0    # 目前 MP
+        self._mp_max = 0    # 最大 MP
         self._last_ocr = 0
         self._ocr_interval = 3  # 秒
         self._ocr_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'win_ocr.ps1')
@@ -275,6 +279,12 @@ class BarReader:
                 current = int(nums[-2])  # 倒數第二個 = 目前值
                 maximum = int(nums[-1])  # 最後一個 = 最大值
                 if 0 < maximum <= 9999 and 0 <= current <= maximum:
+                    if bar == 'hp':
+                        self._hp_cur = current
+                        self._hp_max = maximum
+                    else:
+                        self._mp_cur = current
+                        self._mp_max = maximum
                     return current / maximum
             return -1
         except:
@@ -1296,13 +1306,16 @@ class BotApp:
             self.log_w.see('end');self.log_w.config(state='disabled')
         self.root.after(0,_u)
 
-    def _bar(self,cv,tl,pct,w=120):
+    def _bar(self,cv,tl,pct,w=120,cur=0,mx=0):
         def _u():
             p=max(0,min(1,pct));cv.delete('all')
             cv.create_rectangle(0,0,w,16,fill='#222',outline='')
             c=ACC if p<0.3 else('#f5a623' if p<0.6 else'#27ae60')
             cv.create_rectangle(0,0,int(w*p),16,fill=c,outline='')
-            tl.config(text=f"{p*100:.0f}%")
+            if mx > 0:
+                tl.config(text=f"{cur}/{mx} ({p*100:.0f}%)")
+            else:
+                tl.config(text=f"{p*100:.0f}%")
         self.root.after(0,_u)
 
     def _stats(self):
@@ -1402,10 +1415,10 @@ class BotApp:
         hp = mp = 1.0
         try:
             hp = bars.hp(None, cx, cy, cw, ch)
-            self._bar(self.hp_cv, self.hp_tl, hp)
+            self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max)
             mp = bars.mp(None, cx, cy, cw, ch)
             if mp >= 0:
-                self._bar(self.mp_cv, self.mp_tl, mp)
+                self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max)
         except:
             pass
         # debug：每 10 秒顯示 HP/MP 讀值，方便排查
