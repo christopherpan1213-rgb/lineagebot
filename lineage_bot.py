@@ -2,7 +2,7 @@
 天堂經典版 Bot v12 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "12.3"
+BOT_VERSION = "12.4"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -240,7 +240,12 @@ class BarReader:
         self._mp_max = 0    # 最大 MP
         self._last_ocr = 0
         self._ocr_interval = 3  # 秒
-        self._ocr_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'win_ocr.ps1')
+        # exe 打包後 __file__ 指向暫存目錄，改用 exe 所在目錄
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        self._ocr_script = os.path.join(base_dir, 'win_ocr.ps1')
 
     def _ocr_region(self, cx, cy, cw, ch, x_pct, w_pct, y_pct, h_pct):
         """截取指定區域，放大後 OCR 回傳文字"""
