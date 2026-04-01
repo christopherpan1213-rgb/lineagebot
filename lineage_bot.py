@@ -1,8 +1,8 @@
 """
-天堂經典版 Bot v12 — 核心引擎重構版
-全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
+天堂經典版 Bot v14 — 狀態機架構
+全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "13.5"
+BOT_VERSION = "14.0"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -24,6 +24,27 @@ import mouse as mouse_lib
 import win32gui
 import tkinter as tk
 from tkinter import ttk, filedialog
+from enum import Enum
+
+# ═══════════════════════════════ 狀態機 ═══════════════════════════════
+
+class BotState(Enum):
+    IDLE = "idle"           # 等待/未啟動
+    SCANNING = "scanning"   # 螺旋掃描找怪
+    ATTACKING = "attacking" # 戰鬥中（滑鼠鎖定在怪物）
+    DRINKING = "drinking"   # 點快捷欄喝水/治癒（滑鼠在快捷欄）
+    WALKING = "walking"     # 墮落之地北移（滑鼠在地圖上方）
+    LOOTING = "looting"     # 撿物
+
+# 合法的狀態轉換
+VALID_TRANSITIONS = {
+    BotState.IDLE:      [BotState.SCANNING, BotState.DRINKING],
+    BotState.SCANNING:  [BotState.ATTACKING, BotState.DRINKING, BotState.IDLE, BotState.WALKING],
+    BotState.ATTACKING: [BotState.SCANNING, BotState.DRINKING, BotState.LOOTING, BotState.IDLE],
+    BotState.DRINKING:  [BotState.SCANNING, BotState.ATTACKING, BotState.IDLE],
+    BotState.WALKING:   [BotState.SCANNING, BotState.DRINKING, BotState.IDLE],
+    BotState.LOOTING:   [BotState.SCANNING, BotState.DRINKING, BotState.IDLE],
+}
 
 # 截圖引擎：優先 DXcam，fallback MSS
 try:
@@ -1438,6 +1459,18 @@ class BotApp:
         self.wiki_result.config(state='disabled')
 
     # ═══ 通用 ═══
+    def _set_state(self, new_state):
+        """安全的狀態轉換"""
+        old = getattr(self, 'bot_state', BotState.IDLE)
+        if new_state in VALID_TRANSITIONS.get(old, []):
+            self.bot_state = new_state
+            return True
+        # 強制允許回到 IDLE 和 SCANNING
+        if new_state in (BotState.IDLE, BotState.SCANNING):
+            self.bot_state = new_state
+            return True
+        return False
+
     def log(self,msg):
         self._last_activity = time.time()  # 看門狗用
         ts=time.strftime("%H:%M:%S")
@@ -1460,7 +1493,8 @@ class BotApp:
 
     def _stats(self):
         def _u():
-            self.stat_lbl.config(text=f"殺:{self.kills} 紅:{self.pots} 藍:{self.mpots} 治:{self.heals} B:{self.buffs} 撿:{self.loots}")
+            state = getattr(self, 'bot_state', BotState.IDLE).value
+            self.stat_lbl.config(text=f"[{state}] 殺:{self.kills} 紅:{self.pots} 藍:{self.mpots} 治:{self.heals} B:{self.buffs} 撿:{self.loots}")
             if self.t0:
                 e=time.time()-self.t0;h,m,s=int(e//3600),int(e%3600//60),int(e%60)
                 kph=self.kills/(e/3600) if e>60 else 0
@@ -1478,7 +1512,7 @@ class BotApp:
         if self.running:
             self.running=False;self._status("已停止");self.log("Bot 暫停");save_cfg(self)
         else:
-            self.running=True;self.t0=time.time();self._status("運行中",'#27ae60');self.log("Bot 啟動")
+            self.running=True;self.t0=time.time();self.bot_state=BotState.IDLE;self._status("運行中",'#27ae60');self.log("Bot 啟動")
             self._last_activity = time.time()
             skills.setup([(self.var_sk[i].get(),self.var_cd[i].get()) for i in range(7)])
             if not self.thread or not self.thread.is_alive():
@@ -1596,19 +1630,22 @@ class BotApp:
         return (x_map[num], y)
 
     def _click_hotbar(self, cx, cy, cw, ch, slot_key, clicks=2):
-        """點擊快捷欄格子（用滑鼠，不用鍵盤）
-        先確保滑鼠放開（避免拖走快捷欄），再連點
-        """
+        """點擊快捷欄格子 — 狀態機保護，不會跟攻擊衝突"""
         pos = self._get_hotbar_pos(cx, cy, cw, ch, slot_key)
         if not pos:
             return False
+
+        # 記住之前的狀態，切換到 DRINKING
+        prev_state = getattr(self, 'bot_state', BotState.IDLE)
+        self._set_state(BotState.DRINKING)
+
         x, y = pos
-        # 確保滑鼠放開（可能正在拖曳攻擊中）
+        # 確保滑鼠完全放開（攻擊拖曳可能還在）
         interception.mouse_up('left')
-        time.sleep(0.15)
+        time.sleep(0.2)
         # 移到快捷欄
         move_exact(x, y)
-        time.sleep(0.2)
+        time.sleep(0.25)
         # 連點
         for i in range(clicks):
             interception.mouse_down('left')
@@ -1616,11 +1653,14 @@ class BotApp:
             interception.mouse_up('left')
             if i < clicks - 1:
                 time.sleep(0.12)
-        time.sleep(0.1)
+        time.sleep(0.15)
         # 回到怪物位置
         if hasattr(self, '_combat_monster') and self._combat_monster:
             mx, my = self._combat_monster
             move_exact(mx, my)
+
+        # 恢復之前的狀態
+        self._set_state(prev_state)
         return True
 
     def _check_survival(self, hwnd, cx, cy, cw, ch, timers):
@@ -1957,6 +1997,7 @@ class BotApp:
             self._status(f"掃描({mode})", '#f5a623')
 
             # 掃描+攻擊一體化（碰到怪物瞬間就打）
+            self._set_state(BotState.SCANNING)
             mon = scan_and_attack(cx, cy, cw, ch, hwnd, self.log, mode=mode)
 
             if mon and self.running:
@@ -1980,6 +2021,7 @@ class BotApp:
                 pre_scanner.start(cx, cy, cw, ch, hwnd, exclude=(mx, my))
 
                 # ── 戰鬥等待（雙重偵測：HP條+游標，30ms級反應） ──
+                self._set_state(BotState.ATTACKING)
                 combat_start = time.time()
                 stuck_time = self.var_stuck.get()
                 retry_attack = 0
@@ -1990,9 +2032,11 @@ class BotApp:
                 while time.time() - combat_start < stuck_time and self.running:
                     now = time.time()
 
-                    # 生存檢查（每 1.5 秒）
+                    # 生存檢查（每 1.5 秒，暫停攻擊狀態讓喝水可以執行）
                     if now - last_surv > 1.5:
+                        self._set_state(BotState.SCANNING)  # 暫時解鎖
                         hp, mp = self._check_survival(hwnd, cx, cy, cw, ch, timers)
+                        self._set_state(BotState.ATTACKING)  # 恢復
                         if not self.running:
                             pre_scanner.stop()
                             return
@@ -2035,6 +2079,7 @@ class BotApp:
                 next_mon = pre_scanner.get()
 
                 self._combat_monster = None  # 戰鬥結束清除怪物位置
+                self._set_state(BotState.SCANNING)
                 if killed:
                     self.kills += 1
                     self.log(f"擊殺！(#{self.kills})")
