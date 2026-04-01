@@ -2,7 +2,7 @@
 天堂經典版 Bot v12 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "13.4"
+BOT_VERSION = "13.5"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -1439,6 +1439,7 @@ class BotApp:
 
     # ═══ 通用 ═══
     def log(self,msg):
+        self._last_activity = time.time()  # 看門狗用
         ts=time.strftime("%H:%M:%S")
         def _u():
             self.log_w.config(state='normal');self.log_w.insert('end',f"[{ts}] {msg}\n")
@@ -1478,10 +1479,27 @@ class BotApp:
             self.running=False;self._status("已停止");self.log("Bot 暫停");save_cfg(self)
         else:
             self.running=True;self.t0=time.time();self._status("運行中",'#27ae60');self.log("Bot 啟動")
+            self._last_activity = time.time()
             skills.setup([(self.var_sk[i].get(),self.var_cd[i].get()) for i in range(7)])
             if not self.thread or not self.thread.is_alive():
                 self.thread=threading.Thread(target=self._loop,daemon=True);self.thread.start()
             self._tick()
+            self._watchdog()
+
+    def _watchdog(self):
+        """看門狗：30秒沒活動就自動重啟"""
+        if not self.running:
+            return
+        last = getattr(self, '_last_activity', time.time())
+        if time.time() - last > 30:
+            self.log("[看門狗] 30秒無活動，自動重啟！")
+            # 重啟主迴圈
+            if self.thread and self.thread.is_alive():
+                pass  # 舊執行緒會因 try/except 自動結束
+            self.thread = threading.Thread(target=self._loop, daemon=True)
+            self.thread.start()
+            self._last_activity = time.time()
+        self.root.after(5000, self._watchdog)  # 每 5 秒檢查一次
 
     def _tick(self):
         if self.running:self._stats();self.root.after(1000,self._tick)
