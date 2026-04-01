@@ -2,7 +2,7 @@
 天堂經典版 Bot v12 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "12.6"
+BOT_VERSION = "12.7"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -756,6 +756,7 @@ class BotApp:
         self.var_attack=tk.BooleanVar(value=True)
         self.var_roam=tk.BooleanVar(value=True)
         self.var_loot=tk.BooleanVar(value=False)
+        self.var_ocr_en=tk.BooleanVar(value=True)  # OCR 偵測開關
         self.var_hp_en=tk.BooleanVar(value=True)
         self.var_mp_en=tk.BooleanVar(value=False)
         self.var_heal_en=tk.BooleanVar(value=True)
@@ -1011,6 +1012,10 @@ class BotApp:
             self._spin(r,thr,5,90,w=3,inc=5).pack(side='left')
             self._lbl(r,"%").pack(side='left')
             if extra:extra(r)
+
+        # OCR 開關
+        r=self._frame(p);r.pack(fill='x',padx=10,pady=3)
+        self._chk(r,"HP/MP OCR偵測（關閉=定時喝水）",self.var_ocr_en).pack(side='left')
 
         mkrow("紅水(HP)",self.var_hp_en,self.var_hp_key,self.var_hp_thr)
         mkrow("藍水(MP)",self.var_mp_en,self.var_mp_key,self.var_mp_thr)
@@ -1545,14 +1550,19 @@ class BotApp:
         """生存系統：HP/MP/治療/喝水/Buff — 每次循環都呼叫"""
         now = time.time()
         hp = mp = 1.0
-        try:
-            hp = bars.hp(None, cx, cy, cw, ch)
-            self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max)
-            mp = bars.mp(None, cx, cy, cw, ch)
-            if mp >= 0:
-                self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max)
-        except:
-            pass
+        if self.var_ocr_en.get():
+            try:
+                hp = bars.hp(None, cx, cy, cw, ch)
+                self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max)
+                mp = bars.mp(None, cx, cy, cw, ch)
+                if mp >= 0:
+                    self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max)
+            except:
+                pass
+        else:
+            # OCR 關閉，強制設為 0（觸發定時喝水）
+            bars._hp_max = 0
+            bars._mp_max = 0
         # debug：每 10 秒顯示 HP/MP 讀值，方便排查
         if not hasattr(self, '_last_hp_debug'):
             self._last_hp_debug = 0
