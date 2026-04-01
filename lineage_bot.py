@@ -354,7 +354,15 @@ class BarReader:
         if now - self._last_ocr < self._ocr_interval:
             return
         if getattr(self, '_ocr_busy', False):
-            return  # 上次還沒跑完
+            # OCR 卡超過 15 秒，強制解鎖
+            if now - self._last_ocr > 15:
+                self._ocr_busy = False
+                self._ocr_fails = getattr(self, '_ocr_fails', 0) + 1
+            else:
+                return
+        # OCR 連續失敗 3 次，加長間隔避免一直卡
+        if getattr(self, '_ocr_fails', 0) >= 3:
+            self._ocr_interval = 15  # 放慢到 15 秒一次
         self._last_ocr = now
         self._ocr_busy = True
         threading.Thread(target=self._bg_ocr, args=(cx, cy, cw, ch), daemon=True).start()
@@ -1591,23 +1599,32 @@ class BotApp:
             self.heals += 1
             self.log(f"治癒術({k}) HP={hp*100:.0f}%")
 
-        # 紅水 — 直接用 OCR 讀到的實際數值判斷
+        # 紅水 — OCR 有讀到就用數值判斷，讀不到就定時喝
         hp_cur = bars._hp_cur
         hp_max = bars._hp_max
         hp_thr = self.var_hp_thr.get() / 100
-        need_hp = hp_max > 0 and hp_cur < hp_max * hp_thr and hp_cur > 0
+        if hp_max > 0:
+            need_hp = hp_cur < hp_max * hp_thr and hp_cur > 0
+        else:
+            need_hp = now - timers['hp'] > 8  # OCR 沒讀到，每 8 秒保底喝一次
         if self.var_hp_en.get() and need_hp and now - timers['hp'] > 4:
             k = self.var_hp_key.get()
             self._click_hotbar(cx, cy, cw, ch, k)
             timers['hp'] = now
             self.pots += 1
-            self.log(f"喝紅水({k}) HP={hp_cur}/{hp_max}")
+            if hp_max > 0:
+                self.log(f"喝紅水({k}) HP={hp_cur}/{hp_max}")
+            else:
+                self.log(f"喝紅水({k}) 定時保底")
 
         # 藍水
         mp_cur = bars._mp_cur
         mp_max = bars._mp_max
         mp_thr = self.var_mp_thr.get() / 100
-        need_mp = mp_max > 0 and mp_cur < mp_max * mp_thr and mp_cur > 0
+        if mp_max > 0:
+            need_mp = mp_cur < mp_max * mp_thr and mp_cur > 0
+        else:
+            need_mp = now - timers['mp'] > 10
         if self.var_mp_en.get() and need_mp and now - timers['mp'] > 4:
             k = self.var_mp_key.get()
             self._click_hotbar(cx, cy, cw, ch, k)
