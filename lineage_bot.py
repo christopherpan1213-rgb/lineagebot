@@ -1879,11 +1879,7 @@ class BotApp:
                     self.log(f"擊殺！(#{self.kills})")
                     self._stats()
 
-                    # 定點模式：每 20 隻走回啟動位置
-                    if mode == '定點' and self.kills % 20 == 0 and self.running:
-                        self._status("回定點", '#f5a623')
-                        self.log(f"定點回歸（已殺 {self.kills} 隻）")
-                        self._walk_back_to_anchor(cx, cy, cw, ch, hwnd)
+                    # 定點模式不回定點（角色本來就不動）
 
                     # 快速撿物（定點模式不撿）
                     if self.var_loot.get() and mode != '定點' and self.running:
