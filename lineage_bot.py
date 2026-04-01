@@ -2,7 +2,7 @@
 天堂經典版 Bot v12 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "13.1"
+BOT_VERSION = "13.2"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -468,6 +468,10 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
     center_x = cx + cw // 2
     center_y = cy + sh // 2
 
+    # 墮落之地特化：掃描重心偏上方（怪物從上方刷新）
+    if mode == '墮落之地':
+        center_y = cy + int(sh * 0.35)  # 重心往上移
+
     # 步距依視窗大小縮放（以 860px 寬為基準）
     scale = min(cw, sh) / 860
 
@@ -475,7 +479,11 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
         step = max(30, int(75 * scale))
         max_radius = min(cw, sh) * 2 // 3
         scan_delay = 0.02   # 20ms — 慢速穩定掃描
-    elif mode in ('遠程', '定點', '純定點'):
+    elif mode == '墮落之地':
+        step = max(30, int(75 * scale))
+        max_radius = min(cw, sh) * 3 // 4  # 更大範圍
+        scan_delay = 0.012  # 12ms
+    elif mode in ('遠程', '定點', '純定點', '墮落之地'):
         step = max(30, int(75 * scale))
         max_radius = min(cw, sh) * 2 // 3
         scan_delay = 0.01   # 10ms
@@ -549,6 +557,9 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
 
     if log and count > 0:
         log(f"掃{count}點 無怪")
+    # 墮落之地：掃完回到上方待命
+    if mode == '墮落之地':
+        move_exact(center_x, cy + int(sh * 0.3))
     return None
 
 
@@ -1253,7 +1264,7 @@ class BotApp:
         p=self.pages['模式']
         sf=self._section(p,"掛機模式");sf.pack(fill='x',padx=10,pady=5)
         r=self._frame(sf);r.pack(fill='x',pady=3)
-        for m in ['近戰','遠程','定點','純定點','召喚','隊伍']:
+        for m in ['近戰','遠程','定點','純定點','墮落之地','召喚','隊伍']:
             tk.Radiobutton(r,text=m,variable=self.var_mode,value=m,bg=BG2,fg=FG,
                            selectcolor=ACC2,activebackground=BG2,font=FONTS,
                            command=self._on_mode).pack(side='left',padx=6)
@@ -1283,6 +1294,12 @@ class BotApp:
         self._lbl(r,"攻擊鍵:").pack(side='left')
         self._combo(r,self.var_rng_key,FKEYS,w=3).pack(side='left')
         tk.Label(f,text="掃描+射箭+喝水，絕不點地面移動\n滑鼠掃描較慢，確保穩定性",bg=BG2,fg='#888',font=FONTS).pack(padx=6,pady=6)
+        # 墮落之地
+        f=self._section(p,"墮落之地特化");self.mode_frames['墮落之地']=f
+        r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
+        self._lbl(r,"攻擊鍵:").pack(side='left')
+        self._combo(r,self.var_rng_key,FKEYS,w=3).pack(side='left')
+        tk.Label(f,text="掃描重心偏上方（怪物從上方刷新）\n不點地面、不漫遊、不撿物\n掃描範圍更大，掃完回到上方待命",bg=BG2,fg='#888',font=FONTS).pack(padx=6,pady=6)
         # 召喚
         f=self._section(p,"召喚設定");self.mode_frames['召喚']=f
         r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
@@ -1725,7 +1742,7 @@ class BotApp:
             sy = max(cy + 30, min(cy + sh - 30, my + int(dy / dd * d)))
             move_exact(sx, sy)
             game_click(sx, sy)
-        elif mode in ('定點', '純定點'):
+        elif mode in ('定點', '純定點', '墮落之地'):
             # 定點：按攻擊鍵 → 移到怪物 → 按住 → 拖曳 → 放開
             press_key(self.var_rng_key.get())
             time.sleep(0.1)
@@ -1761,7 +1778,7 @@ class BotApp:
         mode = self.var_mode.get()
         if mode == '近戰':
             skills.use_next()
-        elif mode in ('遠程', '定點', '純定點'):
+        elif mode in ('遠程', '定點', '純定點', '墮落之地'):
             press_key(self.var_rng_key.get())
         elif mode == '召喚':
             press_key(self.var_sum_atk.get())
@@ -1896,7 +1913,7 @@ class BotApp:
                 self._status(f"戰鬥({mode})", ACC)
 
                 # 遠程/定點/召喚模式的額外技能
-                if mode in ('定點', '純定點'):
+                if mode in ('定點', '純定點', '墮落之地'):
                     # 定點：先按攻擊鍵 → 再點擊怪物+短拖曳
                     self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
                 elif mode == '遠程':
@@ -1973,7 +1990,7 @@ class BotApp:
                     # 定點模式不回定點（角色本來就不動）
 
                     # 快速撿物（定點模式不撿）
-                    if self.var_loot.get() and mode not in ('定點','純定點') and self.running:
+                    if self.var_loot.get() and mode not in ('定點','純定點','墮落之地') and self.running:
                         for _ in range(2):
                             if not scan_loot(cx, cy, cw, ch, hwnd):
                                 break
@@ -1999,7 +2016,7 @@ class BotApp:
                 # ── 沒找到怪物 ──
                 no_monster_count += 1
 
-                if self.running and self.var_roam.get() and mode not in ('定點','純定點'):
+                if self.running and self.var_roam.get() and mode not in ('定點','純定點','墮落之地'):
                     # 用小地圖檢查偏移
                     drift = self._check_drift(cx, cy, cw, ch)
 
