@@ -292,44 +292,56 @@ class BarReader:
         return False
 
     def _calibrate_positions(self, cx, cy, cw, ch):
-        """自動搜尋 HP/MP 條位置（只在啟動時執行一次）"""
-        # 掃描不同 Y 位置找 HP 文字
-        for y_pct in [0.75, 0.77, 0.79, 0.81, 0.83, 0.85, 0.87, 0.89, 0.91]:
-            for x_pct in [0.25, 0.30, 0.35, 0.10, 0.15, 0.20]:
-                text = self._ocr_region(cx, cy, cw, ch, x_pct, 0.18, y_pct, 0.03)
-                if text and ('P' in text or 'p' in text):
-                    import re
-                    text_clean = text.replace('O','0').replace('o','0').replace('l','1').replace('I','1')
-                    nums = re.findall(r'\d+', text_clean)
-                    if len(nums) >= 2:
-                        self._hp_pos = (x_pct, 0.18, y_pct, 0.03)
-                        self._parse_bar(text, 'hp')
-                        # MP 通常在 HP 右邊 ~20%
-                        mp_x = x_pct + 0.20
-                        mp_text = self._ocr_region(cx, cy, cw, ch, mp_x, 0.18, y_pct, 0.03)
-                        if mp_text:
-                            self._mp_pos = (mp_x, 0.18, y_pct, 0.03)
-                            self._parse_bar(mp_text, 'mp')
-                        return True
-        return False
+        """自動搜尋 HP/MP 條位置 — 只截一次大圖 OCR"""
+        try:
+            # 截底部 25% 整張，一次 OCR 找 HP 和 MP
+            text = self._ocr_region(cx, cy, cw, ch, 0.0, 1.0, 0.75, 0.25)
+            if not text:
+                return False
+            import re
+            text_clean = text.replace('O','0').replace('o','0').replace('l','1').replace('I','1')
+            hp_match = re.search(r'[Hh][Pp]\s*[:\s]\s*(\d+)\s*[/\\|\s]\s*(\d+)', text_clean)
+            if hp_match:
+                cur, mx = int(hp_match.group(1)), int(hp_match.group(2))
+                if 0 < mx <= 99999 and 0 <= cur <= mx:
+                    self._hp_cur, self._hp_max = cur, mx
+                    self._hp_ratio = cur / mx
+                    self._hp_pos = True  # 標記已校準
+            mp_match = re.search(r'[Mm][Pp]\s*[:\s]\s*(\d+)\s*[/\\|\s]\s*(\d+)', text_clean)
+            if mp_match:
+                cur, mx = int(mp_match.group(1)), int(mp_match.group(2))
+                if 0 < mx <= 99999 and 0 <= cur <= mx:
+                    self._mp_cur, self._mp_max = cur, mx
+                    self._mp_ratio = cur / mx
+                    self._mp_pos = True
+            return self._hp_ratio < 1.1
+        except:
+            return False
 
     def _bg_ocr(self, cx, cy, cw, ch):
-        """背景執行緒：OCR 更新 HP/MP，不阻塞主迴圈"""
-        # 首次校準
-        if not hasattr(self, '_hp_pos'):
-            self._calibrate_positions(cx, cy, cw, ch)
-            self._ocr_busy = False
-            return
-
-        if hasattr(self, '_hp_pos') and self._hp_pos:
-            text = self._ocr_region(cx, cy, cw, ch, *self._hp_pos)
-            self._last_ocr_text = text
-            self._parse_bar(text, 'hp')
-
-        if hasattr(self, '_mp_pos') and self._mp_pos:
-            text = self._ocr_region(cx, cy, cw, ch, *self._mp_pos)
-            self._parse_bar(text, 'mp')
-
+        """背景執行緒：一次 OCR 底部 25%，同時讀 HP 和 MP"""
+        try:
+            text = self._ocr_region(cx, cy, cw, ch, 0.0, 1.0, 0.75, 0.25)
+            if text:
+                self._last_ocr_text = text
+                import re
+                text_clean = text.replace('O','0').replace('o','0').replace('l','1').replace('I','1')
+                hp_match = re.search(r'[Hh][Pp]\s*[:\s]\s*(\d+)\s*[/\\|\s]\s*(\d+)', text_clean)
+                if hp_match:
+                    cur, mx = int(hp_match.group(1)), int(hp_match.group(2))
+                    if 0 < mx <= 99999 and 0 <= cur <= mx:
+                        self._hp_cur, self._hp_max = cur, mx
+                        self._hp_ratio = cur / mx
+                        self._hp_pos = True
+                mp_match = re.search(r'[Mm][Pp]\s*[:\s]\s*(\d+)\s*[/\\|\s]\s*(\d+)', text_clean)
+                if mp_match:
+                    cur, mx = int(mp_match.group(1)), int(mp_match.group(2))
+                    if 0 < mx <= 99999 and 0 <= cur <= mx:
+                        self._mp_cur, self._mp_max = cur, mx
+                        self._mp_ratio = cur / mx
+                        self._mp_pos = True
+        except:
+            pass
         self._ocr_busy = False
 
     def _update(self, cx, cy, cw, ch):
@@ -477,6 +489,22 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
             count += 1
 
             if get_cursor() != CURSOR_FINGER:
+                # 檢查是不是玩家（粉紅色名字）
+                try:
+                    name_area = grab_region(px - 40, py - 25, 80, 20)
+                    if name_area is not None and name_area.size > 0:
+                        r_ch = name_area[:,:,2].astype(int)
+                        g_ch = name_area[:,:,1].astype(int)
+                        b_ch = name_area[:,:,0].astype(int)
+                        # 粉紅色: R>150, B>100, G<120
+                        pink = (r_ch > 150) & (b_ch > 100) & (g_ch < 120)
+                        if pink.sum() > 15:
+                            if log:
+                                log(f"掃到玩家，跳過({px},{py})")
+                            continue
+                except:
+                    pass
+
                 # 找到怪物！
                 if log:
                     log(f"掃{count}點→打！({px},{py})")
