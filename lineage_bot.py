@@ -2,7 +2,7 @@
 天堂經典版 Bot v10 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "11.2"
+BOT_VERSION = "11.3"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -993,27 +993,38 @@ class BotApp:
                 f.write(f"v{remote_ver}")
 
             if updated:
-                # 寫替換腳本：關閉程式後自動把 .new 替換成正式 exe 再啟動
-                bat = os.path.join(app_dir, '_apply_update.bat')
                 exe_new = os.path.join(app_dir, 'LineageBot.exe.new')
                 exe_dst = os.path.join(app_dir, 'LineageBot.exe')
-                with open(bat, 'w') as f:
-                    f.write(f'@echo off\ntimeout /t 2 /nobreak >nul\n')
-                    f.write(f'if exist "{exe_new}" move /y "{exe_new}" "{exe_dst}"\n')
-                    f.write(f'start "" "{exe_dst}"\n')
-                    f.write(f'del "%~f0"\n')
 
-                msg = f"v{BOT_VERSION} -> v{remote_ver} 更新完成！\n點確定自動重啟"
+                # 寫替換腳本
+                bat = os.path.join(app_dir, '_apply_update.bat')
+                with open(bat, 'w') as f:
+                    f.write('@echo off\n')
+                    f.write('echo Updating...\n')
+                    f.write('timeout /t 3 /nobreak >nul\n')
+                    f.write(f'if exist "{exe_new}" (\n')
+                    f.write(f'  del /f "{exe_dst}" 2>nul\n')
+                    f.write(f'  move /y "{exe_new}" "{exe_dst}"\n')
+                    f.write(f')\n')
+                    f.write(f'start "" "{exe_dst}"\n')
+                    f.write('del "%~f0"\n')
+
                 self.root.after(0, lambda: self.update_lbl.config(
                     text=f"v{BOT_VERSION} -> v{remote_ver}", fg='#e74c3c'))
                 self.root.after(0, lambda: self.log(f"已更新: {', '.join(updated)}"))
-                def restart():
+
+                def auto_restart():
                     import tkinter.messagebox
-                    if tkinter.messagebox.askokcancel("更新完成", msg):
-                        os.startfile(bat)
-                        self.running = False
-                        self.root.destroy()
-                self.root.after(0, restart)
+                    tkinter.messagebox.showinfo("更新完成",
+                        f"v{BOT_VERSION} -> v{remote_ver}\n程式將自動重啟")
+                    # 啟動替換腳本，然後關閉自己
+                    import subprocess
+                    subprocess.Popen(f'cmd /c "{bat}"', shell=True,
+                                     creationflags=0x00000008)  # DETACHED_PROCESS
+                    self.running = False
+                    self.root.destroy()
+                    sys.exit(0)
+                self.root.after(0, auto_restart)
             else:
                 self.root.after(0, lambda: self.update_lbl.config(
                     text="更新失敗", fg='#e74c3c'))
