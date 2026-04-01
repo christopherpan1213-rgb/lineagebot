@@ -2,7 +2,7 @@
 天堂經典版 Bot v10 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "11.0"
+BOT_VERSION = "11.1"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -928,23 +928,20 @@ class BotApp:
 
     def _do_update(self):
         import urllib.request
-        base_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{UPDATE_BRANCH}"
-        files_to_update = ['lineage_bot.py', 'lineage_data.py']
+        import json as _json
         app_dir = os.path.dirname(os.path.abspath(__file__))
 
         try:
-            # 1. 先檢查遠端版本
-            ver_url = f"{base_url}/lineage_bot.py"
-            req = urllib.request.Request(ver_url, headers={'User-Agent': 'LineageBot'})
+            # 1. 從 GitHub Releases API 取得最新版本
+            api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            req = urllib.request.Request(api_url, headers={'User-Agent': 'LineageBot'})
             with urllib.request.urlopen(req, timeout=10) as resp:
-                remote_code = resp.read().decode('utf-8')
+                release = _json.loads(resp.read().decode('utf-8'))
 
-            # 解析遠端版本號
-            remote_ver = BOT_VERSION
-            for line in remote_code.split('\n'):
-                if line.strip().startswith('BOT_VERSION'):
-                    remote_ver = line.split('=')[1].strip().strip('"').strip("'")
-                    break
+            remote_ver = release.get('tag_name', '').lstrip('v')
+            if not remote_ver:
+                self.root.after(0, lambda: self.update_lbl.config(text="檢查失敗", fg='#e74c3c'))
+                return
 
             if remote_ver == BOT_VERSION:
                 self.root.after(0, lambda: self.update_lbl.config(
@@ -952,9 +949,25 @@ class BotApp:
                 self.root.after(0, lambda: self.log("已是最新版本"))
                 return
 
-            # 2. 有新版本，下載所有檔案
+            self.root.after(0, lambda: self.log(f"發現新版 v{remote_ver}，開始下載..."))
             updated = []
-            for fname in files_to_update:
+
+            # 2. 下載 exe（從 Release assets）
+            for asset in release.get('assets', []):
+                if asset['name'] == 'LineageBot.exe':
+                    exe_url = asset['browser_download_url']
+                    exe_new = os.path.join(app_dir, 'LineageBot.exe.new')
+                    self.root.after(0, lambda: self.log("下載 LineageBot.exe..."))
+                    req = urllib.request.Request(exe_url, headers={'User-Agent': 'LineageBot'})
+                    with urllib.request.urlopen(req, timeout=120) as resp:
+                        with open(exe_new, 'wb') as f:
+                            f.write(resp.read())
+                    updated.append('LineageBot.exe')
+                    break
+
+            # 3. 下載 py 檔
+            base_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{UPDATE_BRANCH}"
+            for fname in ['lineage_bot.py', 'lineage_data.py']:
                 try:
                     url = f"{base_url}/{fname}"
                     req = urllib.request.Request(url, headers={'User-Agent': 'LineageBot'})
@@ -963,33 +976,44 @@ class BotApp:
                     if len(content) < 100:
                         continue
                     fpath = os.path.join(app_dir, fname)
-                    # 先寫到暫存檔，再覆蓋（避免檔案鎖定問題）
                     tmp = fpath + '.new'
                     with open(tmp, 'wb') as f:
                         f.write(content)
-                    # 備份舊檔
-                    try:
-                        bak = fpath + '.bak'
-                        import shutil
-                        shutil.copy2(fpath, bak)
+                    try: os.replace(tmp, fpath)
                     except:
-                        pass
-                    # 覆蓋（程式執行中也能寫入，重啟後生效）
-                    try:
-                        os.replace(tmp, fpath)
-                    except:
-                        shutil.copy2(tmp, fpath)
-                        os.remove(tmp)
+                        import shutil; shutil.copy2(tmp, fpath)
+                        try: os.remove(tmp)
+                        except: pass
                     updated.append(fname)
-                except Exception as e:
-                    self.root.after(0, lambda e=e, f=fname: self.log(f"更新 {f} 失敗: {e}"))
+                except:
+                    pass
+
+            # 4. 寫 version.txt
+            with open(os.path.join(app_dir, 'version.txt'), 'w') as f:
+                f.write(f"v{remote_ver}")
 
             if updated:
-                msg = f"已更新 v{remote_ver}（{', '.join(updated)}）\n請重啟程式生效"
+                # 寫替換腳本：關閉程式後自動把 .new 替換成正式 exe 再啟動
+                bat = os.path.join(app_dir, '_apply_update.bat')
+                exe_new = os.path.join(app_dir, 'LineageBot.exe.new')
+                exe_dst = os.path.join(app_dir, 'LineageBot.exe')
+                with open(bat, 'w') as f:
+                    f.write(f'@echo off\ntimeout /t 2 /nobreak >nul\n')
+                    f.write(f'if exist "{exe_new}" move /y "{exe_new}" "{exe_dst}"\n')
+                    f.write(f'start "" "{exe_dst}"\n')
+                    f.write(f'del "%~f0"\n')
+
+                msg = f"v{BOT_VERSION} -> v{remote_ver} 更新完成！\n點確定自動重啟"
                 self.root.after(0, lambda: self.update_lbl.config(
-                    text=f"v{BOT_VERSION} -> v{remote_ver} 請重啟", fg='#e74c3c'))
-                self.root.after(0, lambda: self.log(msg))
-                self.root.after(0, lambda: __import__('tkinter').messagebox.showinfo("更新完成", msg))
+                    text=f"v{BOT_VERSION} -> v{remote_ver}", fg='#e74c3c'))
+                self.root.after(0, lambda: self.log(f"已更新: {', '.join(updated)}"))
+                def restart():
+                    import tkinter.messagebox
+                    if tkinter.messagebox.askokcancel("更新完成", msg):
+                        os.startfile(bat)
+                        self.running = False
+                        self.root.destroy()
+                self.root.after(0, restart)
             else:
                 self.root.after(0, lambda: self.update_lbl.config(
                     text="更新失敗", fg='#e74c3c'))
