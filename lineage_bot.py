@@ -1,11 +1,14 @@
 """
-天堂經典版 Bot v10 — 核心引擎重構版
+天堂經典版 Bot v12 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "12.0"
+BOT_VERSION = "12.3"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
+
+# 喝水改用滑鼠點快捷欄，不需要管理員權限
+
 ctypes.windll.shcore.SetProcessDpiAwareness(2)
 
 import time, sys, os, math, random, threading, json, winsound
@@ -33,7 +36,7 @@ except:
 
 # 輸入引擎：優先 Interception
 try:
-    import interception; interception.auto_capture_devices(mouse=True); HAS_INTERCEPTION = True
+    import interception; interception.auto_capture_devices(mouse=True, keyboard=True); HAS_INTERCEPTION = True
 except: HAS_INTERCEPTION = False
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -239,71 +242,101 @@ class BarReader:
         self._ocr_interval = 3  # 秒
         self._ocr_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'win_ocr.ps1')
 
-    def _ocr_bar(self, cx, cy, cw, ch, bar='hp'):
-        """截取 HP/MP 條區域，用 Windows OCR 讀數字"""
+    def _ocr_region(self, cx, cy, cw, ch, x_pct, w_pct, y_pct, h_pct):
+        """截取指定區域，放大後 OCR 回傳文字"""
         try:
-            if bar == 'hp':
-                bx, bw = int(cw * 0.10), int(cw * 0.40)
-            else:
-                bx, bw = int(cw * 0.52), int(cw * 0.40)
-            by = int(ch * 0.88)
-            bh = int(ch * 0.08)
-
+            bx = int(cw * x_pct)
+            bw = int(cw * w_pct)
+            by = int(ch * y_pct)
+            bh = int(ch * h_pct)
             frame = grab_region(cx + bx, cy + by, bw, bh)
             if frame is None or frame.size == 0:
-                return -1
-
-            # 放大 8 倍（OCR 需要大圖）
+                return ""
             big = cv2.resize(frame, None, fx=8, fy=8, interpolation=cv2.INTER_LINEAR)
-            tmp = os.path.join(os.environ.get('TEMP', '.'), f'_ocr_{bar}.png')
+            tmp = os.path.join(os.environ.get('TEMP', '.'), '_ocr_tmp.png')
             cv2.imwrite(tmp, big)
-
-            # 呼叫 Windows OCR
-            import subprocess, re
+            import subprocess
             r = subprocess.run(
                 ['powershell', '-ExecutionPolicy', 'Bypass', '-File', self._ocr_script, tmp],
                 capture_output=True, text=True, timeout=5
             )
-            text = r.stdout.strip()
             try: os.remove(tmp)
             except: pass
-
-            if not text:
-                return -1
-
-            # 解析：可能是 "HP : 123 123" 或 "HP:123/123" 或 "123 123"
-            text = text.replace('O', '0').replace('o', '0').replace('l', '1').replace('I', '1')
-            # 找兩個數字
-            nums = re.findall(r'\d+', text)
-            if len(nums) >= 2:
-                current = int(nums[-2])  # 倒數第二個 = 目前值
-                maximum = int(nums[-1])  # 最後一個 = 最大值
-                if 0 < maximum <= 9999 and 0 <= current <= maximum:
-                    if bar == 'hp':
-                        self._hp_cur = current
-                        self._hp_max = maximum
-                    else:
-                        self._mp_cur = current
-                        self._mp_max = maximum
-                    return current / maximum
-            return -1
+            return r.stdout.strip()
         except:
-            return -1
+            return ""
+
+    def _parse_bar(self, text, bar='hp'):
+        """從 OCR 文字解析 HP 或 MP 數值"""
+        if not text:
+            return False
+        import re
+        text = text.replace('O', '0').replace('o', '0').replace('l', '1').replace('I', '1')
+        nums = re.findall(r'\d+', text)
+        if len(nums) >= 2:
+            cur = int(nums[-2])
+            mx = int(nums[-1])
+            if 0 < mx <= 99999 and 0 <= cur <= mx:
+                if bar == 'hp':
+                    self._hp_cur, self._hp_max = cur, mx
+                    self._hp_ratio = cur / mx
+                else:
+                    self._mp_cur, self._mp_max = cur, mx
+                    self._mp_ratio = cur / mx
+                return True
+        return False
+
+    def _calibrate_positions(self, cx, cy, cw, ch):
+        """自動搜尋 HP/MP 條位置（只在啟動時執行一次）"""
+        # 掃描不同 Y 位置找 HP 文字
+        for y_pct in [0.75, 0.77, 0.79, 0.81, 0.83, 0.85, 0.87, 0.89, 0.91]:
+            for x_pct in [0.25, 0.30, 0.35, 0.10, 0.15, 0.20]:
+                text = self._ocr_region(cx, cy, cw, ch, x_pct, 0.18, y_pct, 0.03)
+                if text and ('P' in text or 'p' in text):
+                    import re
+                    text_clean = text.replace('O','0').replace('o','0').replace('l','1').replace('I','1')
+                    nums = re.findall(r'\d+', text_clean)
+                    if len(nums) >= 2:
+                        self._hp_pos = (x_pct, 0.18, y_pct, 0.03)
+                        self._parse_bar(text, 'hp')
+                        # MP 通常在 HP 右邊 ~20%
+                        mp_x = x_pct + 0.20
+                        mp_text = self._ocr_region(cx, cy, cw, ch, mp_x, 0.18, y_pct, 0.03)
+                        if mp_text:
+                            self._mp_pos = (mp_x, 0.18, y_pct, 0.03)
+                            self._parse_bar(mp_text, 'mp')
+                        return True
+        return False
+
+    def _bg_ocr(self, cx, cy, cw, ch):
+        """背景執行緒：OCR 更新 HP/MP，不阻塞主迴圈"""
+        # 首次校準
+        if not hasattr(self, '_hp_pos'):
+            self._calibrate_positions(cx, cy, cw, ch)
+            self._ocr_busy = False
+            return
+
+        if hasattr(self, '_hp_pos') and self._hp_pos:
+            text = self._ocr_region(cx, cy, cw, ch, *self._hp_pos)
+            self._last_ocr_text = text
+            self._parse_bar(text, 'hp')
+
+        if hasattr(self, '_mp_pos') and self._mp_pos:
+            text = self._ocr_region(cx, cy, cw, ch, *self._mp_pos)
+            self._parse_bar(text, 'mp')
+
+        self._ocr_busy = False
 
     def _update(self, cx, cy, cw, ch):
-        """定時 OCR 更新 HP/MP"""
+        """啟動背景 OCR（非阻塞）"""
         now = time.time()
         if now - self._last_ocr < self._ocr_interval:
             return
+        if getattr(self, '_ocr_busy', False):
+            return  # 上次還沒跑完
         self._last_ocr = now
-
-        hp = self._ocr_bar(cx, cy, cw, ch, 'hp')
-        if hp >= 0:
-            self._hp_ratio = hp
-
-        mp = self._ocr_bar(cx, cy, cw, ch, 'mp')
-        if mp >= 0:
-            self._mp_ratio = mp
+        self._ocr_busy = True
+        threading.Thread(target=self._bg_ocr, args=(cx, cy, cw, ch), daemon=True).start()
 
     def hp(self, sct, cx, cy, cw, ch):
         self._update(cx, cy, cw, ch)
@@ -313,8 +346,9 @@ class BarReader:
         return self._mp_ratio
 
     def calibrate(self, sct, cx, cy, cw, ch):
-        self._last_ocr = 0  # 強制下次 OCR
-        self._update(cx, cy, cw, ch)
+        self._last_ocr = 0
+        self._ocr_busy = False
+        self._bg_ocr(cx, cy, cw, ch)  # 校準時同步跑
         return self._hp_ratio >= 0
 
 bars = BarReader()
@@ -654,7 +688,7 @@ SUPPLY_PRESETS = {
 # ═══════════════════════════════ GUI ═══════════════════════════════
 
 BG1='#0f0f1a'; BG2='#16213e'; BG3='#1a1a2e'; FG='#c0c0c0'; ACC='#e94560'; ACC2='#0f3460'
-FONT=('Microsoft JhengHei',9); FONTS=('Microsoft JhengHei',8); FONTM=('Consolas',8)
+FONT=('Microsoft JhengHei',11); FONTS=('Microsoft JhengHei',10); FONTM=('Consolas',10)
 
 class BotApp:
     def __init__(self):
@@ -755,7 +789,7 @@ class BotApp:
         nav.pack(side='left',fill='y')
         nav.pack_propagate(False)
 
-        tk.Label(nav,text="天堂Bot v8",bg=BG1,fg=ACC,font=('Microsoft JhengHei',12,'bold')).pack(pady=(10,15))
+        tk.Label(nav,text=f"天堂Bot v{BOT_VERSION}",bg=BG1,fg=ACC,font=('Microsoft JhengHei',14,'bold')).pack(pady=(10,15))
 
         self.pages={}
         self.nav_btns={}
@@ -1409,6 +1443,59 @@ class BotApp:
             time.sleep(1.5)
         return False
 
+    def _get_hotbar_pos(self, cx, cy, cw, ch, slot_key):
+        """取得快捷欄格子的螢幕座標 (F5-F12)
+        上排: F5 F6 F7 F8
+        下排: F9 F10 F11 F12
+        """
+        right_edge = cx + cw - 10
+        big_w = int(cw * 0.052)
+        bottom_y = cy + int(ch * 0.91)
+        top_y = bottom_y - int(ch * 0.060)
+
+        # F12→F9 的 X 位置（從右往左）
+        x12 = right_edge - big_w // 2
+        x_map = {12: x12, 11: x12 - big_w, 10: x12 - big_w*2, 9: x12 - big_w*3}
+        x_map[5] = x_map[9]
+        x_map[6] = x_map[10]
+        x_map[7] = x_map[11]
+        x_map[8] = x_map[12]
+
+        # 解析 slot_key（"F5" → 5）
+        try:
+            num = int(slot_key.upper().replace('F', ''))
+        except:
+            return None
+        if num not in x_map:
+            return None
+
+        y = top_y if num <= 8 else bottom_y
+        return (x_map[num], y)
+
+    def _click_hotbar(self, cx, cy, cw, ch, slot_key, clicks=2):
+        """點擊快捷欄格子（用滑鼠，不用鍵盤）
+        clicks: 道具=2下，法術=4下
+        點完後回到怪物位置，按住拖曳繼續攻擊
+        """
+        pos = self._get_hotbar_pos(cx, cy, cw, ch, slot_key)
+        if not pos:
+            return False
+        x, y = pos
+        # 模擬真人雙擊（跟開資料夾一樣快）
+        move_exact(x, y)
+        time.sleep(0.2)
+        for i in range(clicks):
+            interception.mouse_down('left')
+            time.sleep(0.04)
+            interception.mouse_up('left')
+            if i < clicks - 1:
+                time.sleep(0.12)  # 雙擊間隔 ~120ms
+        # 回到怪物位置（戰鬥迴圈會自動重新攻擊）
+        if hasattr(self, '_combat_monster') and self._combat_monster:
+            mx, my = self._combat_monster
+            move_exact(mx, my)
+        return True
+
     def _check_survival(self, hwnd, cx, cy, cw, ch, timers):
         """生存系統：HP/MP/治療/喝水/Buff — 每次循環都呼叫"""
         now = time.time()
@@ -1425,17 +1512,13 @@ class BotApp:
         if not hasattr(self, '_last_hp_debug'):
             self._last_hp_debug = 0
         if now - self._last_hp_debug > 10:
-            self.log(f"[HP={hp:.2f} MP={mp:.2f} 窗={cw}x{ch}]")
+            self.log(f"[HP={bars._hp_cur}/{bars._hp_max} MP={bars._mp_cur}/{bars._mp_max} OCR={getattr(bars,'_last_ocr_text','')}]")
             self._last_hp_debug = now
 
         # Buff（不需要 HP 值，定時觸發）
         if self.var_buff_en.get() and now - timers['buff'] > self.var_buff_sec.get():
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
-            time.sleep(0.15)
-            key = self.var_buff_key.get().lower()
-            keyboard.press(key)
-            time.sleep(0.05)
-            keyboard.release(key)
+            k = self.var_buff_key.get()
+            self._click_hotbar(cx, cy, cw, ch, k, clicks=4)  # 法術類4下
             time.sleep(0.3)
             timers['buff'] = now
             self.buffs += 1
@@ -1462,37 +1545,38 @@ class BotApp:
         # 治癒術（HP 低於閾值 / 讀取失敗每 10 秒保底）
         heal_trigger = (hp >= 0 and hp < self.var_heal_thr.get() / 100) \
                        or (hp < 0 and now - timers['heal'] > 10)
-        if self.var_heal_en.get() and heal_trigger and now - timers['heal'] > 2:
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
-            time.sleep(0.1)
-            key = self.var_heal_key.get().lower()
+        if self.var_heal_en.get() and heal_trigger and now - timers['heal'] > 3:
+            k = self.var_heal_key.get()
             for _ in range(self.var_heal_n.get()):
-                keyboard.press(key); time.sleep(0.05); keyboard.release(key)
-                time.sleep(0.15)
+                self._click_hotbar(cx, cy, cw, ch, k, clicks=4)  # 法術類4下
+                time.sleep(0.3)
             timers['heal'] = now
             self.heals += 1
+            self.log(f"治癒術({k}) HP={hp*100:.0f}%")
 
-        # 紅水（HP 低於閾值 / 讀取失敗每 5 秒保底）
-        hp_trigger = (hp >= 0 and hp < self.var_hp_thr.get() / 100) \
-                     or (hp < 0 and now - timers['hp'] > 5)
-        if self.var_hp_en.get() and hp_trigger and now - timers['hp'] > 1.5:
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
-            time.sleep(0.1)
-            key = self.var_hp_key.get().lower()
-            keyboard.press(key); time.sleep(0.05); keyboard.release(key)
+        # 紅水 — 直接用 OCR 讀到的實際數值判斷
+        hp_cur = bars._hp_cur
+        hp_max = bars._hp_max
+        hp_thr = self.var_hp_thr.get() / 100
+        need_hp = hp_max > 0 and hp_cur < hp_max * hp_thr and hp_cur > 0
+        if self.var_hp_en.get() and need_hp and now - timers['hp'] > 4:
+            k = self.var_hp_key.get()
+            self._click_hotbar(cx, cy, cw, ch, k)
             timers['hp'] = now
             self.pots += 1
+            self.log(f"喝紅水({k}) HP={hp_cur}/{hp_max}")
 
-        # 藍水（MP 低於閾值 / 讀取失敗每 8 秒保底）
-        mp_trigger = (mp >= 0 and mp < self.var_mp_thr.get() / 100) \
-                     or (mp < 0 and now - timers['mp'] > 8)
-        if self.var_mp_en.get() and mp_trigger and now - timers['mp'] > 3:
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
-            time.sleep(0.1)
-            key = self.var_mp_key.get().lower()
-            keyboard.press(key); time.sleep(0.05); keyboard.release(key)
+        # 藍水
+        mp_cur = bars._mp_cur
+        mp_max = bars._mp_max
+        mp_thr = self.var_mp_thr.get() / 100
+        need_mp = mp_max > 0 and mp_cur < mp_max * mp_thr and mp_cur > 0
+        if self.var_mp_en.get() and need_mp and now - timers['mp'] > 4:
+            k = self.var_mp_key.get()
+            self._click_hotbar(cx, cy, cw, ch, k)
             timers['mp'] = now
             self.mpots += 1
+            self.log(f"喝藍水({k}) MP={mp_cur}/{mp_max}")
 
         # Buff
         # 召喚重召喚
@@ -1711,6 +1795,7 @@ class BotApp:
 
             if mon and self.running:
                 mx, my = mon
+                self._combat_monster = (mx, my)  # 記錄怪物位置（喝水後回來用）
                 no_monster_count = 0
                 self._status(f"戰鬥({mode})", ACC)
 
@@ -1783,6 +1868,7 @@ class BotApp:
                 pre_scanner.stop()
                 next_mon = pre_scanner.get()
 
+                self._combat_monster = None  # 戰鬥結束清除怪物位置
                 if killed:
                     self.kills += 1
                     self.log(f"擊殺！(#{self.kills})")
