@@ -2,7 +2,7 @@
 天堂經典版 Bot v12 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "12.8"
+BOT_VERSION = "12.9"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -1589,7 +1589,7 @@ class BotApp:
         # Buff（不需要 HP 值，定時觸發）
         if self.var_buff_en.get() and now - timers['buff'] > self.var_buff_sec.get():
             k = self.var_buff_key.get()
-            self._click_hotbar(cx, cy, cw, ch, k, clicks=4)  # 法術類4下
+            self._click_hotbar(cx, cy, cw, ch, k, clicks=3)  # 法術類3下
             time.sleep(0.3)
             timers['buff'] = now
             self.buffs += 1
@@ -1619,7 +1619,7 @@ class BotApp:
         if self.var_heal_en.get() and heal_trigger and now - timers['heal'] > 3:
             k = self.var_heal_key.get()
             for _ in range(self.var_heal_n.get()):
-                self._click_hotbar(cx, cy, cw, ch, k, clicks=4)  # 法術類4下
+                self._click_hotbar(cx, cy, cw, ch, k, clicks=3)  # 法術類3下
                 time.sleep(0.3)
             timers['heal'] = now
             self.heals += 1
