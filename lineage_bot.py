@@ -2,7 +2,7 @@
 天堂經典版 Bot v12 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "13.0"
+BOT_VERSION = "13.1"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -471,10 +471,14 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
     # 步距依視窗大小縮放（以 860px 寬為基準）
     scale = min(cw, sh) / 860
 
-    if mode in ('遠程', '定點'):
+    if mode == '純定點':
         step = max(30, int(75 * scale))
         max_radius = min(cw, sh) * 2 // 3
-        scan_delay = 0.01   # 10ms — 太快遊戲來不及更新游標
+        scan_delay = 0.02   # 20ms — 慢速穩定掃描
+    elif mode in ('遠程', '定點', '純定點'):
+        step = max(30, int(75 * scale))
+        max_radius = min(cw, sh) * 2 // 3
+        scan_delay = 0.01   # 10ms
     else:
         step = max(25, int(65 * scale))
         max_radius = min(cw, sh) // 3
@@ -1249,7 +1253,7 @@ class BotApp:
         p=self.pages['模式']
         sf=self._section(p,"掛機模式");sf.pack(fill='x',padx=10,pady=5)
         r=self._frame(sf);r.pack(fill='x',pady=3)
-        for m in ['近戰','遠程','定點','召喚','隊伍']:
+        for m in ['近戰','遠程','定點','純定點','召喚','隊伍']:
             tk.Radiobutton(r,text=m,variable=self.var_mode,value=m,bg=BG2,fg=FG,
                            selectcolor=ACC2,activebackground=BG2,font=FONTS,
                            command=self._on_mode).pack(side='left',padx=6)
@@ -1273,6 +1277,12 @@ class BotApp:
         self._lbl(r,"攻擊鍵:").pack(side='left')
         self._combo(r,self.var_rng_key,FKEYS,w=3).pack(side='left')
         tk.Label(f,text="原地不動，只掃描射箭+喝水\n不移動、不撿物、不漫遊",bg=BG2,fg='#888',font=FONTS).pack(padx=6,pady=6)
+        # 純定點
+        f=self._section(p,"純定點設定");self.mode_frames['純定點']=f
+        r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
+        self._lbl(r,"攻擊鍵:").pack(side='left')
+        self._combo(r,self.var_rng_key,FKEYS,w=3).pack(side='left')
+        tk.Label(f,text="掃描+射箭+喝水，絕不點地面移動\n滑鼠掃描較慢，確保穩定性",bg=BG2,fg='#888',font=FONTS).pack(padx=6,pady=6)
         # 召喚
         f=self._section(p,"召喚設定");self.mode_frames['召喚']=f
         r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
@@ -1540,23 +1550,27 @@ class BotApp:
 
     def _click_hotbar(self, cx, cy, cw, ch, slot_key, clicks=2):
         """點擊快捷欄格子（用滑鼠，不用鍵盤）
-        clicks: 道具=2下，法術=4下
-        點完後回到怪物位置，按住拖曳繼續攻擊
+        先確保滑鼠放開（避免拖走快捷欄），再連點
         """
         pos = self._get_hotbar_pos(cx, cy, cw, ch, slot_key)
         if not pos:
             return False
         x, y = pos
-        # 模擬真人雙擊（跟開資料夾一樣快）
+        # 確保滑鼠放開（可能正在拖曳攻擊中）
+        interception.mouse_up('left')
+        time.sleep(0.15)
+        # 移到快捷欄
         move_exact(x, y)
         time.sleep(0.2)
+        # 連點
         for i in range(clicks):
             interception.mouse_down('left')
             time.sleep(0.04)
             interception.mouse_up('left')
             if i < clicks - 1:
-                time.sleep(0.12)  # 雙擊間隔 ~120ms
-        # 回到怪物位置（戰鬥迴圈會自動重新攻擊）
+                time.sleep(0.12)
+        time.sleep(0.1)
+        # 回到怪物位置
         if hasattr(self, '_combat_monster') and self._combat_monster:
             mx, my = self._combat_monster
             move_exact(mx, my)
@@ -1711,7 +1725,7 @@ class BotApp:
             sy = max(cy + 30, min(cy + sh - 30, my + int(dy / dd * d)))
             move_exact(sx, sy)
             game_click(sx, sy)
-        elif mode == '定點':
+        elif mode in ('定點', '純定點'):
             # 定點：按攻擊鍵 → 移到怪物 → 按住 → 拖曳 → 放開
             press_key(self.var_rng_key.get())
             time.sleep(0.1)
@@ -1747,7 +1761,7 @@ class BotApp:
         mode = self.var_mode.get()
         if mode == '近戰':
             skills.use_next()
-        elif mode in ('遠程', '定點'):
+        elif mode in ('遠程', '定點', '純定點'):
             press_key(self.var_rng_key.get())
         elif mode == '召喚':
             press_key(self.var_sum_atk.get())
@@ -1774,9 +1788,9 @@ class BotApp:
         _detect_input_mode(g[0])
         self.log(f"輸入模式: {INPUT_MODE}")
 
-        # 自動偵測手指游標 handle
+        # 自動偵測手指游標 handle（純定點模式不需要）
         global CURSOR_FINGER
-        if CURSOR_FINGER is None:
+        if CURSOR_FINGER is None and self.var_mode.get() != '純定點':
             self.log("偵測游標 handle...")
             hwnd_init = g[0]
             cx0, cy0, cw0, ch0 = get_rect(hwnd_init)
@@ -1862,6 +1876,8 @@ class BotApp:
                 path.play(cx, cy, cw, ch, hwnd)
                 continue
 
+            mode = self.var_mode.get()
+
             # ── 自動練功循環 ──
             if not self.var_attack.get():
                 time.sleep(0.5)
@@ -1880,7 +1896,7 @@ class BotApp:
                 self._status(f"戰鬥({mode})", ACC)
 
                 # 遠程/定點/召喚模式的額外技能
-                if mode == '定點':
+                if mode in ('定點', '純定點'):
                     # 定點：先按攻擊鍵 → 再點擊怪物+短拖曳
                     self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
                 elif mode == '遠程':
@@ -1957,7 +1973,7 @@ class BotApp:
                     # 定點模式不回定點（角色本來就不動）
 
                     # 快速撿物（定點模式不撿）
-                    if self.var_loot.get() and mode != '定點' and self.running:
+                    if self.var_loot.get() and mode not in ('定點','純定點') and self.running:
                         for _ in range(2):
                             if not scan_loot(cx, cy, cw, ch, hwnd):
                                 break
@@ -1983,7 +1999,7 @@ class BotApp:
                 # ── 沒找到怪物 ──
                 no_monster_count += 1
 
-                if self.running and self.var_roam.get() and mode != '定點':
+                if self.running and self.var_roam.get() and mode not in ('定點','純定點'):
                     # 用小地圖檢查偏移
                     drift = self._check_drift(cx, cy, cw, ch)
 
