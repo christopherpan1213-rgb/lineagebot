@@ -2,7 +2,7 @@
 天堂經典版 Bot v12 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "13.2"
+BOT_VERSION = "13.3"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -772,6 +772,10 @@ class BotApp:
         self.var_roam=tk.BooleanVar(value=True)
         self.var_loot=tk.BooleanVar(value=False)
         self.var_ocr_en=tk.BooleanVar(value=True)  # OCR 偵測開關
+        # 墮落之地定時北移
+        self.var_fallen_walk_en=tk.BooleanVar(value=True)
+        self.var_fallen_walk_min=tk.IntVar(value=5)    # 每幾分鐘
+        self.var_fallen_walk_sec=tk.IntVar(value=10)   # 點幾秒
         self.var_hp_en=tk.BooleanVar(value=True)
         self.var_hp_sec=tk.IntVar(value=8)       # 定時喝紅水秒數
         self.var_mp_en=tk.BooleanVar(value=False)
@@ -1299,7 +1303,15 @@ class BotApp:
         r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
         self._lbl(r,"攻擊鍵:").pack(side='left')
         self._combo(r,self.var_rng_key,FKEYS,w=3).pack(side='left')
-        tk.Label(f,text="掃描重心偏上方（怪物從上方刷新）\n不點地面、不漫遊、不撿物\n掃描範圍更大，掃完回到上方待命",bg=BG2,fg='#888',font=FONTS).pack(padx=6,pady=6)
+        r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
+        self._chk(r,"定時往上走",self.var_fallen_walk_en).pack(side='left')
+        self._lbl(r,"每").pack(side='left',padx=(4,1))
+        self._spin(r,self.var_fallen_walk_min,1,30,w=3).pack(side='left')
+        self._lbl(r,"分鐘").pack(side='left')
+        self._lbl(r,"  點").pack(side='left')
+        self._spin(r,self.var_fallen_walk_sec,3,30,w=3).pack(side='left')
+        self._lbl(r,"秒").pack(side='left')
+        tk.Label(f,text="掃描重心偏上方，掃完回上方待命\n定時往上走：每隔N分鐘點擊地圖上方移動",bg=BG2,fg='#888',font=FONTS).pack(padx=6,pady=6)
         # 召喚
         f=self._section(p,"召喚設定");self.mode_frames['召喚']=f
         r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
@@ -1894,6 +1906,28 @@ class BotApp:
                 continue
 
             mode = self.var_mode.get()
+
+            # ── 墮落之地定時北移 ──
+            if mode == '墮落之地' and self.var_fallen_walk_en.get():
+                timer_key = 'fallen_walk'
+                if timer_key not in timers:
+                    timers[timer_key] = time.time()
+                interval = self.var_fallen_walk_min.get() * 60
+                if time.time() - timers[timer_key] > interval:
+                    walk_sec = self.var_fallen_walk_sec.get()
+                    self._status("往上移動", '#f5a623')
+                    self.log(f"墮落之地：往上走 {walk_sec} 秒")
+                    upper_x = cx + cw // 2 + random.randint(-50, 50)
+                    upper_y = cy + int(sh_scene * 0.15) + random.randint(-20, 20)
+                    for _ in range(walk_sec):
+                        if not self.running:
+                            break
+                        move_exact(upper_x + random.randint(-10, 10), upper_y + random.randint(-10, 10))
+                        time.sleep(0.1)
+                        game_click()
+                        time.sleep(0.9)
+                    timers[timer_key] = time.time()
+                    self.log("北移完成，繼續掃描")
 
             # ── 自動練功循環 ──
             if not self.var_attack.get():
