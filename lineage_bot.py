@@ -2,7 +2,7 @@
 天堂經典版 Bot v12 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "13.3"
+BOT_VERSION = "13.4"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -1872,6 +1872,7 @@ class BotApp:
             self.log("小地圖定點記錄失敗")
 
         while True:
+          try:
             if not self.running:
                 time.sleep(0.2)
                 continue
@@ -2071,6 +2072,10 @@ class BotApp:
                             no_monster_count = 0
                 elif self.running:
                     time.sleep(1 + random.uniform(0, 0.5))
+          except Exception as e:
+            self.log(f"[錯誤] {e} — 自動恢復")
+            time.sleep(1)
+            continue
 
     def run(self):self.log("就緒");self.root.mainloop()
 
