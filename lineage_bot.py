@@ -2,7 +2,7 @@
 天堂經典版 Bot v10 — 核心引擎重構版
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機架構
 """
-BOT_VERSION = "11.4"
+BOT_VERSION = "12.0"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -224,27 +224,88 @@ def get_rect(h):
 # ═══════════════════════════════ HP/MP ═══════════════════════════════
 
 class BarReader:
-    """HP/MP 條讀取 — 用相對比例定位，不需要校準"""
+    """HP/MP 條讀取 — 用 Windows OCR 直接讀 HP: 123/123 數字
+    每 3 秒 OCR 一次（避免太頻繁），中間用快取值
+    """
     def __init__(self):
         self.ok = True
-    def _read(self, cx, cy, cw, ch, y_pct, xs_pct, xe_pct):
+        self._hp_ratio = 1.0
+        self._mp_ratio = 1.0
+        self._last_ocr = 0
+        self._ocr_interval = 3  # 秒
+        self._ocr_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'win_ocr.ps1')
+
+    def _ocr_bar(self, cx, cy, cw, ch, bar='hp'):
+        """截取 HP/MP 條區域，用 Windows OCR 讀數字"""
         try:
-            by = int(ch * y_pct)
-            bxs = int(cw * xs_pct)
-            bw = int(cw * (xe_pct - xs_pct))
-            if bw < 10: return -1
-            strip = grab_region(cx + bxs, cy + by - 1, bw, 3)
-            bright = strip.max(axis=2).mean(axis=0)
-            filled = bright > 120
-            if not filled.any(): return 0.0
-            return min(1.0, (np.max(np.where(filled)) + 1) / len(bright))
-        except: return -1
+            if bar == 'hp':
+                bx, bw = int(cw * 0.10), int(cw * 0.40)
+            else:
+                bx, bw = int(cw * 0.52), int(cw * 0.40)
+            by = int(ch * 0.88)
+            bh = int(ch * 0.08)
+
+            frame = grab_region(cx + bx, cy + by, bw, bh)
+            if frame is None or frame.size == 0:
+                return -1
+
+            # 放大 8 倍（OCR 需要大圖）
+            big = cv2.resize(frame, None, fx=8, fy=8, interpolation=cv2.INTER_LINEAR)
+            tmp = os.path.join(os.environ.get('TEMP', '.'), f'_ocr_{bar}.png')
+            cv2.imwrite(tmp, big)
+
+            # 呼叫 Windows OCR
+            import subprocess, re
+            r = subprocess.run(
+                ['powershell', '-ExecutionPolicy', 'Bypass', '-File', self._ocr_script, tmp],
+                capture_output=True, text=True, timeout=5
+            )
+            text = r.stdout.strip()
+            try: os.remove(tmp)
+            except: pass
+
+            if not text:
+                return -1
+
+            # 解析：可能是 "HP : 123 123" 或 "HP:123/123" 或 "123 123"
+            text = text.replace('O', '0').replace('o', '0').replace('l', '1').replace('I', '1')
+            # 找兩個數字
+            nums = re.findall(r'\d+', text)
+            if len(nums) >= 2:
+                current = int(nums[-2])  # 倒數第二個 = 目前值
+                maximum = int(nums[-1])  # 最後一個 = 最大值
+                if 0 < maximum <= 9999 and 0 <= current <= maximum:
+                    return current / maximum
+            return -1
+        except:
+            return -1
+
+    def _update(self, cx, cy, cw, ch):
+        """定時 OCR 更新 HP/MP"""
+        now = time.time()
+        if now - self._last_ocr < self._ocr_interval:
+            return
+        self._last_ocr = now
+
+        hp = self._ocr_bar(cx, cy, cw, ch, 'hp')
+        if hp >= 0:
+            self._hp_ratio = hp
+
+        mp = self._ocr_bar(cx, cy, cw, ch, 'mp')
+        if mp >= 0:
+            self._mp_ratio = mp
+
     def hp(self, sct, cx, cy, cw, ch):
-        return self._read(cx, cy, cw, ch, 0.792, 0.30, 0.45)
+        self._update(cx, cy, cw, ch)
+        return self._hp_ratio
+
     def mp(self, sct, cx, cy, cw, ch):
-        return self._read(cx, cy, cw, ch, 0.792, 0.55, 0.70)
+        return self._mp_ratio
+
     def calibrate(self, sct, cx, cy, cw, ch):
-        return True
+        self._last_ocr = 0  # 強制下次 OCR
+        self._update(cx, cy, cw, ch)
+        return self._hp_ratio >= 0
 
 bars = BarReader()
 
@@ -767,10 +828,49 @@ class BotApp:
         info=f"點擊:{'interception' if HAS_INTERCEPTION else 'mouse_lib'} | 怪物庫:{len(MONSTER_NAMES)}隻"
         tk.Label(p,text=info,bg=BG2,fg='#27ae60' if HAS_INTERCEPTION else '#f5a623',font=('Consolas',7)).pack()
 
+        # Debug
+        r=self._frame(p);r.pack(fill='x',padx=10,pady=2)
+        tk.Button(r,text="HP偵測截圖",font=FONTS,bg='#8e44ad',fg='white',command=self._debug_hp).pack(side='left',padx=3)
+
         # 日誌
         sf=self._section(p,"日誌");sf.pack(fill='both',padx=10,pady=(5,10),expand=True)
         self.log_w=tk.Text(sf,height=8,bg='#0d1117',fg='#58a6ff',font=('Consolas',8),state='disabled',wrap='word')
         self.log_w.pack(fill='both',expand=True)
+
+    def _debug_hp(self):
+        """截圖並標記 HP/MP 條偵測位置，存到桌面"""
+        g = find_game()
+        if not g:
+            self.log("找不到遊戲視窗！")
+            return
+        cx, cy, cw, ch = get_rect(g[0])
+        frame = grab_region(cx, cy, cw, ch)
+
+        # 標記 HP 條位置（紅色框）
+        hp_y = int(ch * 0.792)
+        hp_xs = int(cw * 0.30)
+        hp_xe = int(cw * 0.45)
+        cv2.rectangle(frame, (hp_xs, hp_y - 5), (hp_xe, hp_y + 5), (0, 0, 255), 2)
+        cv2.putText(frame, "HP", (hp_xs, hp_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+        # 標記 MP 條位置（藍色框）
+        mp_xs = int(cw * 0.55)
+        mp_xe = int(cw * 0.70)
+        cv2.rectangle(frame, (mp_xs, hp_y - 5), (mp_xe, hp_y + 5), (255, 0, 0), 2)
+        cv2.putText(frame, "MP", (mp_xs, hp_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+
+        # 讀值
+        hp = bars.hp(None, cx, cy, cw, ch)
+        mp = bars.mp(None, cx, cy, cw, ch)
+        cv2.putText(frame, f"HP={hp:.2f} MP={mp:.2f} Window={cw}x{ch}",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+        # 存檔
+        out = os.path.join(os.path.expanduser("~"), "Desktop", "hp_debug.png")
+        cv2.imwrite(out, frame)
+        self.log(f"HP偵測截圖已存: {out}")
+        self.log(f"HP={hp:.2f} MP={mp:.2f} 視窗={cw}x{ch}")
+        self.log(f"HP條位置: Y={hp_y} X={hp_xs}-{hp_xe}")
 
     # ═══ 戰鬥頁 ═══
     def _build_combat(self):
@@ -1346,10 +1446,9 @@ class BotApp:
             time.sleep(5)
             return hp, mp
 
-        # 治癒術（HP 低於閾值 / 讀取失敗每 10 秒 / HP=1.0 疑似讀錯每 15 秒保底）
+        # 治癒術（HP 低於閾值 / 讀取失敗每 10 秒保底）
         heal_trigger = (hp >= 0 and hp < self.var_heal_thr.get() / 100) \
-                       or (hp < 0 and now - timers['heal'] > 10) \
-                       or (hp >= 0.99 and now - timers['heal'] > 15)
+                       or (hp < 0 and now - timers['heal'] > 10)
         if self.var_heal_en.get() and heal_trigger and now - timers['heal'] > 2:
             ctypes.windll.user32.SetForegroundWindow(hwnd)
             time.sleep(0.1)
@@ -1360,10 +1459,9 @@ class BotApp:
             timers['heal'] = now
             self.heals += 1
 
-        # 紅水（HP 低於閾值 / HP 讀取失敗每 5 秒 / HP=1.0 疑似讀錯每 8 秒保底）
+        # 紅水（HP 低於閾值 / 讀取失敗每 5 秒保底）
         hp_trigger = (hp >= 0 and hp < self.var_hp_thr.get() / 100) \
-                     or (hp < 0 and now - timers['hp'] > 5) \
-                     or (hp >= 0.99 and now - timers['hp'] > 8)
+                     or (hp < 0 and now - timers['hp'] > 5)
         if self.var_hp_en.get() and hp_trigger and now - timers['hp'] > 1.5:
             ctypes.windll.user32.SetForegroundWindow(hwnd)
             time.sleep(0.1)
@@ -1372,10 +1470,9 @@ class BotApp:
             timers['hp'] = now
             self.pots += 1
 
-        # 藍水（同樣加保底：MP=1.0 疑似讀錯每 10 秒喝）
+        # 藍水（MP 低於閾值 / 讀取失敗每 8 秒保底）
         mp_trigger = (mp >= 0 and mp < self.var_mp_thr.get() / 100) \
-                     or (mp < 0 and now - timers['mp'] > 8) \
-                     or (mp >= 0.99 and now - timers['mp'] > 10)
+                     or (mp < 0 and now - timers['mp'] > 8)
         if self.var_mp_en.get() and mp_trigger and now - timers['mp'] > 3:
             ctypes.windll.user32.SetForegroundWindow(hwnd)
             time.sleep(0.1)
