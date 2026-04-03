@@ -2061,15 +2061,16 @@ class BotApp:
                 attack(mx, my, cx, cy, cw, ch)
 
     def _combat_skill(self):
-        """戰鬥中持續施放技能
-        注意：定點/墮落之地不在這裡按攻擊鍵（會搶滑鼠干擾戰鬥偵測）
-        這些模式的攻擊鍵在 _do_attack 和 retry_attack 裡處理
-        """
+        """戰鬥中持續施放技能（用鍵盤，不動滑鼠）"""
         mode = self.var_mode.get()
         if mode == '近戰':
             skills.use_next()
-        # 定點/純定點/墮落之地：不做任何事（靠 retry_attack 重新攻擊）
-        # 遠程/召喚/隊伍：也靠 retry_attack 處理
+        elif mode in ('遠程', '定點', '純定點', '墮落之地'):
+            press_key(self.var_rng_key.get())
+        elif mode == '召喚':
+            press_key(self.var_sum_atk.get())
+        elif mode == '隊伍' and self.var_pt_role.get() == '補師':
+            press_key(self.var_pt_heal.get())
 
     # ═══ 新功能：死亡復活 / 防PK / 畫面差異偵測 / 回城補給 ═══
 
