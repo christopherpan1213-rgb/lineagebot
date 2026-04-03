@@ -1,8 +1,8 @@
 """
-天堂經典版 Bot — 狀態機架構
+天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "15.2"
+BOT_VERSION = "14.0"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -29,25 +29,21 @@ from enum import Enum
 # ═══════════════════════════════ 狀態機 ═══════════════════════════════
 
 class BotState(Enum):
-    IDLE = "idle"              # 等待/未啟動
-    SCANNING = "scanning"      # 螺旋掃描找怪
-    ATTACKING = "attacking"    # 戰鬥中（滑鼠鎖定在怪物）
-    DRINKING = "drinking"      # 點快捷欄喝水/治癒（滑鼠在快捷欄）
-    WALKING = "walking"        # 墮落之地北移（滑鼠在地圖上方）
-    LOOTING = "looting"        # 撿物
-    DEAD = "dead"              # 死亡等待復活
-    RESUPPLYING = "resupply"   # 回城補給中
+    IDLE = "idle"           # 等待/未啟動
+    SCANNING = "scanning"   # 螺旋掃描找怪
+    ATTACKING = "attacking" # 戰鬥中（滑鼠鎖定在怪物）
+    DRINKING = "drinking"   # 點快捷欄喝水/治癒（滑鼠在快捷欄）
+    WALKING = "walking"     # 墮落之地北移（滑鼠在地圖上方）
+    LOOTING = "looting"     # 撿物
 
 # 合法的狀態轉換
 VALID_TRANSITIONS = {
-    BotState.IDLE:         [BotState.SCANNING, BotState.DRINKING],
-    BotState.SCANNING:     [BotState.ATTACKING, BotState.DRINKING, BotState.IDLE, BotState.WALKING, BotState.DEAD, BotState.RESUPPLYING],
-    BotState.ATTACKING:    [BotState.SCANNING, BotState.DRINKING, BotState.LOOTING, BotState.IDLE, BotState.DEAD],
-    BotState.DRINKING:     [BotState.SCANNING, BotState.ATTACKING, BotState.IDLE],
-    BotState.WALKING:      [BotState.SCANNING, BotState.DRINKING, BotState.IDLE],
-    BotState.LOOTING:      [BotState.SCANNING, BotState.DRINKING, BotState.IDLE],
-    BotState.DEAD:         [BotState.SCANNING, BotState.IDLE],
-    BotState.RESUPPLYING:  [BotState.SCANNING, BotState.IDLE],
+    BotState.IDLE:      [BotState.SCANNING, BotState.DRINKING],
+    BotState.SCANNING:  [BotState.ATTACKING, BotState.DRINKING, BotState.IDLE, BotState.WALKING],
+    BotState.ATTACKING: [BotState.SCANNING, BotState.DRINKING, BotState.LOOTING, BotState.IDLE],
+    BotState.DRINKING:  [BotState.SCANNING, BotState.ATTACKING, BotState.IDLE],
+    BotState.WALKING:   [BotState.SCANNING, BotState.DRINKING, BotState.IDLE],
+    BotState.LOOTING:   [BotState.SCANNING, BotState.DRINKING, BotState.IDLE],
 }
 
 # 截圖引擎：優先 DXcam，fallback MSS
@@ -252,187 +248,145 @@ def get_rect(h):
 # ═══════════════════════════════ HP/MP ═══════════════════════════════
 
 class BarReader:
-    """HP/MP 條讀取 — 像素顏色偵測（不需要 OCR）
-    原理：HP 條損失部分變白，剩餘部分是紅/暖色
-          MP 條損失部分變白，剩餘部分是藍色
-    速度：~1ms（vs OCR 3-5秒），任何 Windows 都能用
+    """HP/MP 條讀取 — 用 Windows OCR 直接讀 HP: 123/123 數字
+    每 3 秒 OCR 一次（避免太頻繁），中間用快取值
     """
     def __init__(self):
         self.ok = True
         self._hp_ratio = 1.0
         self._mp_ratio = 1.0
-        self._hp_cur = 0
-        self._hp_max = 0
-        self._mp_cur = 0
-        self._mp_max = 0
-        self._last_read = 0
-        self._read_interval = 0.5  # 每 0.5 秒讀一次（比 OCR 快很多）
-        self._last_ocr_text = ""   # 相容性：保留給 debug log 用
-        self._hp_bar = None  # (x_start, x_end, y_center) 相對於遊戲視窗的比例
-        self._mp_bar = None
-        self._calibrated = False
-
-    def _find_bars(self, cx, cy, cw, ch):
-        """自動找 HP/MP 條的位置（只需校準一次）
-        找同時有 dark_red 和 dark_blue 的行（= HP 和 MP 條的行）
-        """
-        best_y = 0
-        best_score = 0
-
-        # 截取底部 UI 區域一次（避免多次截圖）
-        y_start = int(ch * 0.73)
-        y_end = int(ch * 0.86)
-        frame = grab_region(cx, cy + y_start, cw, y_end - y_start)
-        if frame is None or frame.size == 0:
-            return False
-
-        for y_off in range(frame.shape[0]):
-            row = frame[y_off]
-            r, g, b = row[:, 2].astype(int), row[:, 1].astype(int), row[:, 0].astype(int)
-            # 嚴格 dark red（排除金色裝飾邊框）
-            dr = ((r > 120) & (g < 80) & (b < 40)).sum()
-            # 藍色
-            db = ((b > 80) & ((b - r) > 20)).sum()
-            if dr > 5 and db > 5 and dr + db > best_score:
-                best_score = dr + db
-                best_y = y_start + y_off
-
-        if best_y == 0:
-            return False
-
-        # 取 3 行平均，用嚴格顏色找 red 和 blue 的主要叢集
-        rows = grab_region(cx, cy + best_y - 1, cw, 3)
-        if rows is None or rows.size == 0:
-            return False
-        r, g, b = rows[:,:,2].astype(int), rows[:,:,1].astype(int), rows[:,:,0].astype(int)
-
-        dr_col = ((r > 120) & (g < 80) & (b < 40)).any(axis=0)
-        db_col = ((b > 80) & ((b - r) > 20) & ((b - g) > 10)).any(axis=0)
-
-        # HP: 找最大的 dark_red 連續叢集
-        dr_xs = np.where(dr_col)[0]
-        if len(dr_xs) > 3:
-            gaps = np.diff(dr_xs)
-            splits = np.where(gaps > 15)[0]
-            if len(splits):
-                clusters = np.split(dr_xs, splits + 1)
-                largest = max(clusters, key=len)
-            else:
-                largest = dr_xs
-            self._hp_bar = (largest[0] / cw, largest[-1] / cw, best_y / ch)
-
-        # MP: 找最大的 blue 連續叢集
-        db_xs = np.where(db_col)[0]
-        if len(db_xs) > 3:
-            gaps = np.diff(db_xs)
-            splits = np.where(gaps > 15)[0]
-            if len(splits):
-                clusters = np.split(db_xs, splits + 1)
-                largest = max(clusters, key=len)
-            else:
-                largest = db_xs
-            self._mp_bar = (largest[0] / cw, largest[-1] / cw, best_y / ch)
-
-        return self._hp_bar is not None
-
-    def _read_bar_ratio(self, cx, cy, cw, ch, bar_info, bar_type='hp'):
-        """讀取 HP/MP 條填充比例
-        結構：[邊框] [白色=損失] [暗線] [填充色+文字=剩餘] [邊框]
-        方法：
-        1. 從校準的填充起點開始
-        2. 往右延伸（含文字區），遇到連續暗區才停
-        3. 往左掃找白色區（= 損失）
-        4. HP = 填充寬 / (白色寬 + 填充寬)
-        """
-        if not bar_info:
-            return 1.0
-
-        red_x1_pct, red_x2_pct, y_pct = bar_info
-        y = int(ch * y_pct)
-
-        # 擴大截取範圍（往左多抓 15%，往右多抓一點）
-        scan_left = int(cw * 0.15)
-        x_start = max(0, int(cw * red_x1_pct) - scan_left)
-        x_end = min(cw, int(cw * red_x2_pct) + int(cw * 0.05))
-        region_w = x_end - x_start
-        if region_w < 5:
-            return 1.0
-
-        frame = grab_region(cx + x_start, cy + y - 1, region_w, 3)
-        if frame is None or frame.size == 0:
-            return 1.0
-
-        r, g, b = frame[:,:,2].astype(int), frame[:,:,1].astype(int), frame[:,:,0].astype(int)
-        bright = (r + g + b) / 3
-
-        if bar_type == 'hp':
-            fill_col = ((r > 120) & (g < 80) & (b < 40)).any(axis=0)
+        self._hp_cur = 0    # 目前 HP
+        self._hp_max = 0    # 最大 HP
+        self._mp_cur = 0    # 目前 MP
+        self._mp_max = 0    # 最大 MP
+        self._last_ocr = 0
+        self._ocr_interval = 3  # 秒
+        # exe 打包後 __file__ 指向暫存目錄，改用 exe 所在目錄
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
         else:
-            fill_col = ((b > 80) & ((b - r) > 20) & ((b - g) > 10)).any(axis=0)
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        self._ocr_script = os.path.join(base_dir, 'win_ocr.ps1')
 
-        non_dark = (bright > 50).any(axis=0)
-        white_col = (bright > 150).any(axis=0)
+    def _ocr_region(self, cx, cy, cw, ch, x_pct, w_pct, y_pct, h_pct):
+        """截取指定區域，放大後 OCR 回傳文字"""
+        try:
+            bx = int(cw * x_pct)
+            bw = int(cw * w_pct)
+            by = int(ch * y_pct)
+            bh = int(ch * h_pct)
+            frame = grab_region(cx + bx, cy + by, bw, bh)
+            if frame is None or frame.size == 0:
+                return ""
+            # 根據圖片大小決定放大倍率（太大會卡 OCR）
+            scale = max(2, min(6, 800 // max(frame.shape[0], 1)))
+            big = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+            tmp = os.path.join(os.environ.get('TEMP', '.'), '_ocr_tmp.png')
+            cv2.imwrite(tmp, big)
+            import subprocess
+            r = subprocess.run(
+                ['powershell', '-ExecutionPolicy', 'Bypass', '-File', self._ocr_script, tmp],
+                capture_output=True, text=True, timeout=8
+            )
+            try: os.remove(tmp)
+            except: pass
+            return r.stdout.strip()
+        except:
+            return ""
 
-        fill_xs = np.where(fill_col)[0]
-        if len(fill_xs) == 0:
-            return 0.0
+    def _parse_bar(self, text, bar='hp'):
+        """從 OCR 文字解析 HP 或 MP 數值"""
+        if not text:
+            return False
+        import re
+        text = text.replace('O', '0').replace('o', '0').replace('l', '1').replace('I', '1')
+        nums = re.findall(r'\d+', text)
+        if len(nums) >= 2:
+            cur = int(nums[-2])
+            mx = int(nums[-1])
+            if 0 < mx <= 99999 and 0 <= cur <= mx:
+                if bar == 'hp':
+                    self._hp_cur, self._hp_max = cur, mx
+                    self._hp_ratio = cur / mx
+                else:
+                    self._mp_cur, self._mp_max = cur, mx
+                    self._mp_ratio = cur / mx
+                return True
+        return False
 
-        first_fill = fill_xs[0]
+    def _calibrate_positions(self, cx, cy, cw, ch):
+        """自動搜尋 HP/MP 條位置 — 只截一次大圖 OCR"""
+        try:
+            # 截底部 25% 整張，一次 OCR 找 HP 和 MP
+            # 只截中間 60% 寬度的底部 20%（避免截太大卡住 OCR）
+            text = self._ocr_region(cx, cy, cw, ch, 0.20, 0.60, 0.78, 0.18)
+            if not text:
+                return False
+            import re
+            text_clean = text.replace('O','0').replace('o','0').replace('l','1').replace('I','1')
+            hp_match = re.search(r'[Hh][Pp]\s*[:\s]\s*(\d+)\s*[/\\|\s]\s*(\d+)', text_clean)
+            if hp_match:
+                cur, mx = int(hp_match.group(1)), int(hp_match.group(2))
+                if 0 < mx <= 99999 and 0 <= cur <= mx:
+                    self._hp_cur, self._hp_max = cur, mx
+                    self._hp_ratio = cur / mx
+                    self._hp_pos = True  # 標記已校準
+            mp_match = re.search(r'[Mm][Pp]\s*[:\s]\s*(\d+)\s*[/\\|\s]\s*(\d+)', text_clean)
+            if mp_match:
+                cur, mx = int(mp_match.group(1)), int(mp_match.group(2))
+                if 0 < mx <= 99999 and 0 <= cur <= mx:
+                    self._mp_cur, self._mp_max = cur, mx
+                    self._mp_ratio = cur / mx
+                    self._mp_pos = True
+            return self._hp_ratio < 1.1
+        except:
+            return False
 
-        # 往右延伸：包含填充色 + 文字（非暗區），遇到 8+ 連續暗格停止
-        bar_right = first_fill
-        dark_run = 0
-        for x in range(first_fill, frame.shape[1]):
-            if non_dark[x]:
-                bar_right = x
-                dark_run = 0
-            else:
-                dark_run += 1
-                if dark_run > 8:
-                    break
-
-        fill_width = bar_right - first_fill + 1
-
-        # 往左掃找白色（損失）區域，跳過 1-3px 暗線邊框
-        white_width = 0
-        x = first_fill - 1
-        skipped = 0
-        while x >= 0 and not white_col[x] and skipped < 4:
-            x -= 1; skipped += 1
-        while x >= 0 and white_col[x]:
-            white_width += 1; x -= 1
-
-        total = fill_width + white_width
-        if total < 3:
-            return 1.0
-
-        return fill_width / total
+    def _bg_ocr(self, cx, cy, cw, ch):
+        """背景執行緒：一次 OCR 底部 25%，同時讀 HP 和 MP"""
+        try:
+            # 只截中間 60% 寬度的底部 20%（避免截太大卡住 OCR）
+            text = self._ocr_region(cx, cy, cw, ch, 0.20, 0.60, 0.78, 0.18)
+            if text:
+                self._last_ocr_text = text
+                import re
+                text_clean = text.replace('O','0').replace('o','0').replace('l','1').replace('I','1')
+                hp_match = re.search(r'[Hh][Pp]\s*[:\s]\s*(\d+)\s*[/\\|\s]\s*(\d+)', text_clean)
+                if hp_match:
+                    cur, mx = int(hp_match.group(1)), int(hp_match.group(2))
+                    if 0 < mx <= 99999 and 0 <= cur <= mx:
+                        self._hp_cur, self._hp_max = cur, mx
+                        self._hp_ratio = cur / mx
+                        self._hp_pos = True
+                mp_match = re.search(r'[Mm][Pp]\s*[:\s]\s*(\d+)\s*[/\\|\s]\s*(\d+)', text_clean)
+                if mp_match:
+                    cur, mx = int(mp_match.group(1)), int(mp_match.group(2))
+                    if 0 < mx <= 99999 and 0 <= cur <= mx:
+                        self._mp_cur, self._mp_max = cur, mx
+                        self._mp_ratio = cur / mx
+                        self._mp_pos = True
+        except:
+            pass
+        self._ocr_busy = False
 
     def _update(self, cx, cy, cw, ch):
-        """快速更新 HP/MP（每 0.5 秒）"""
+        """啟動背景 OCR（非阻塞）"""
         now = time.time()
-        if now - self._last_read < self._read_interval:
+        if now - self._last_ocr < self._ocr_interval:
             return
-
-        # 首次自動校準
-        if not self._calibrated:
-            if self._find_bars(cx, cy, cw, ch):
-                self._calibrated = True
+        if getattr(self, '_ocr_busy', False):
+            # OCR 卡超過 15 秒，強制解鎖
+            if now - self._last_ocr > 15:
+                self._ocr_busy = False
+                self._ocr_fails = getattr(self, '_ocr_fails', 0) + 1
             else:
-                # 校準失敗，使用預設位置
-                self._hp_bar = (0.10, 0.48, 0.803)
-                self._mp_bar = (0.55, 0.85, 0.803)
-                self._calibrated = True
-
-        self._last_read = now
-        self._hp_ratio = self._read_bar_ratio(cx, cy, cw, ch, self._hp_bar, 'hp')
-        self._mp_ratio = self._read_bar_ratio(cx, cy, cw, ch, self._mp_bar, 'mp')
-        # 相容性：估算數值（條的比例 * 假設最大值）
-        if self._hp_max > 0:
-            self._hp_cur = int(self._hp_ratio * self._hp_max)
-        if self._mp_max > 0:
-            self._mp_cur = int(self._mp_ratio * self._mp_max)
-        self._last_ocr_text = f"pixel HP={self._hp_ratio:.0%} MP={self._mp_ratio:.0%}"
+                return
+        # OCR 連續失敗 3 次，加長間隔避免一直卡
+        if getattr(self, '_ocr_fails', 0) >= 3:
+            self._ocr_interval = 15  # 放慢到 15 秒一次
+        self._last_ocr = now
+        self._ocr_busy = True
+        threading.Thread(target=self._bg_ocr, args=(cx, cy, cw, ch), daemon=True).start()
 
     def hp(self, sct, cx, cy, cw, ch):
         self._update(cx, cy, cw, ch)
@@ -442,8 +396,9 @@ class BarReader:
         return self._mp_ratio
 
     def calibrate(self, sct, cx, cy, cw, ch):
-        self._calibrated = False
-        self._update(cx, cy, cw, ch)
+        self._last_ocr = 0
+        self._ocr_busy = False
+        self._bg_ocr(cx, cy, cw, ch)  # 校準時同步跑
         return self._hp_ratio >= 0
 
 bars = BarReader()
@@ -538,26 +493,25 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
     if mode == '墮落之地':
         center_y = cy + int(sh * 0.35)  # 重心往上移
 
-    # 步距依視窗大小縮放（以 860px 為基準）
-    short_side = min(cw, sh)
-    scale = short_side / 860
+    # 步距依視窗大小縮放（以 860px 寬為基準）
+    scale = min(cw, sh) / 860
 
     if mode == '純定點':
-        step = max(15, int(75 * scale))
-        max_radius = short_side * 2 // 3
-        scan_delay = 0.02
+        step = max(30, int(75 * scale))
+        max_radius = min(cw, sh) * 2 // 3
+        scan_delay = 0.02   # 20ms — 慢速穩定掃描
     elif mode == '墮落之地':
-        step = max(15, int(75 * scale))
-        max_radius = short_side * 3 // 4
-        scan_delay = 0.012
-    elif mode in ('遠程', '定點'):
-        step = max(15, int(75 * scale))
-        max_radius = short_side * 2 // 3
-        scan_delay = 0.01
-    else:  # 近戰
-        step = max(15, int(65 * scale))
-        max_radius = short_side // 2
-        scan_delay = 0.015
+        step = max(30, int(75 * scale))
+        max_radius = min(cw, sh) * 3 // 4  # 更大範圍
+        scan_delay = 0.012  # 12ms
+    elif mode in ('遠程', '定點', '純定點', '墮落之地'):
+        step = max(30, int(75 * scale))
+        max_radius = min(cw, sh) * 2 // 3
+        scan_delay = 0.01   # 10ms
+    else:
+        step = max(25, int(65 * scale))
+        max_radius = min(cw, sh) // 3
+        scan_delay = 0.015  # 15ms
 
     start_angle = random.uniform(0, 2 * math.pi)
     count = 0
@@ -601,10 +555,11 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
                     log(f"掃{count}點→打！({px},{py})")
 
                 # 按下+拖曳攻擊
-                time.sleep(0.05)
+                time.sleep(0.05)  # 讓遊戲確認游標在怪物上
                 game_down()
-                time.sleep(0.08)
+                time.sleep(0.08)  # 等遊戲註冊按下事件
 
+                # 所有模式統一拖曳距離（150-300px），天堂需要拖夠遠才觸發攻擊
                 drag_dist = random.randint(150, 300)
                 drag_x = px + random.randint(-15, 15)
                 drag_y = min(cy + sh - 20, py + drag_dist)
@@ -737,19 +692,12 @@ def roam(cx, cy, cw, ch, hwnd, dist):
 # ═══════════════════════════════ 技能系統 ═══════════════════════════════
 
 class SkillSystem:
-    def __init__(self): self.skills=[];self.last={};self._hotbar_fn=None
-    def setup(self,sl,hotbar_fn=None):
-        self.skills=[(k,cd) for k,cd in sl if k!='無'];self.last={k:0 for k,_ in self.skills}
-        if hotbar_fn: self._hotbar_fn=hotbar_fn
+    def __init__(self): self.skills=[];self.last={}
+    def setup(self,sl): self.skills=[(k,cd) for k,cd in sl if k!='無'];self.last={k:0 for k,_ in self.skills}
     def use_next(self):
         now=time.time()
         for k,cd in self.skills:
-            if now-self.last.get(k,0)>=cd:
-                if self._hotbar_fn:
-                    self._hotbar_fn(k, clicks=4)  # 法術類連點
-                else:
-                    press_key(k)  # fallback
-                self.last[k]=now;return k
+            if now-self.last.get(k,0)>=cd: press_key(k);self.last[k]=now;return k
         return None
 
 skills=SkillSystem()
@@ -821,32 +769,13 @@ SUPPLY_PRESETS = {
 # ═══════════════════════════════ GUI ═══════════════════════════════
 
 BG1='#0f0f1a'; BG2='#16213e'; BG3='#1a1a2e'; FG='#c0c0c0'; ACC='#e94560'; ACC2='#0f3460'
-
-# 字型：優先微軟正黑體，fallback 到其他中文字型或系統預設
-def _pick_font():
-    import tkinter as _tk
-    _r = _tk.Tk(); _r.withdraw()
-    available = _tk.font.families()
-    _r.destroy()
-    for name in ('Microsoft JhengHei', 'Microsoft YaHei', 'SimHei', 'PMingLiU', 'Arial'):
-        if name in available:
-            return name
-    return 'TkDefaultFont'
-
-try:
-    import tkinter.font
-    _UI_FONT = _pick_font()
-except:
-    _UI_FONT = 'Microsoft JhengHei'
-
-FONT=(_UI_FONT,11); FONTS=(_UI_FONT,10); FONTM=('Consolas',10)
+FONT=('Microsoft JhengHei',11); FONTS=('Microsoft JhengHei',10); FONTM=('Consolas',10)
 
 class BotApp:
     def __init__(self):
         self.root=tk.Tk()
         self.root.title(f"天堂經典版 Bot v{BOT_VERSION}")
-        self.root.geometry("780x680")
-        self.root.minsize(700, 600)
+        self.root.geometry("680x620")
         self.root.configure(bg=BG1)
         self.root.attributes('-topmost',True)
         self.root.protocol("WM_DELETE_WINDOW",self._close)
@@ -869,11 +798,11 @@ class BotApp:
         self.var_fallen_walk_min=tk.IntVar(value=5)    # 每幾分鐘
         self.var_fallen_walk_sec=tk.IntVar(value=10)   # 點幾秒
         self.var_hp_en=tk.BooleanVar(value=True)
-        self.var_hp_sec=tk.IntVar(value=60)      # 定時喝紅水秒數
+        self.var_hp_sec=tk.IntVar(value=8)       # 定時喝紅水秒數
         self.var_mp_en=tk.BooleanVar(value=False)
-        self.var_mp_sec=tk.IntVar(value=60)      # 定時喝藍水秒數
+        self.var_mp_sec=tk.IntVar(value=10)      # 定時喝藍水秒數
         self.var_heal_en=tk.BooleanVar(value=True)
-        self.var_heal_sec=tk.IntVar(value=60)    # 定時治癒術秒數
+        self.var_heal_sec=tk.IntVar(value=15)    # 定時治癒術秒數
         self.var_buff_en=tk.BooleanVar(value=True)
         self.var_recall_en=tk.BooleanVar(value=False)
         self.var_antipk=tk.BooleanVar(value=False)
@@ -881,23 +810,6 @@ class BotApp:
         self.var_humanize=tk.BooleanVar(value=True)
         self.var_sslog=tk.BooleanVar(value=False)
         self.var_path_en=tk.BooleanVar(value=False)
-
-        # 新功能 v15
-        self.var_auto_rez=tk.BooleanVar(value=False)       # 自動復活
-        self.var_rez_delay=tk.IntVar(value=5)               # 復活等待秒數
-        self.var_pk_cooldown=tk.IntVar(value=30)            # 防 PK 冷卻秒數
-        self.var_fast_detect=tk.BooleanVar(value=False)     # 畫面差異偵測
-        self.var_supply_en=tk.BooleanVar(value=False)       # 自動回城補給
-        self.var_supply_count=tk.IntVar(value=100)          # 喝幾次水後回城
-        self.var_dead_stuck=tk.BooleanVar(value=False)        # 死亡卡住自動關遊戲
-        # v15.1 防偵測
-        self.var_captcha_detect=tk.BooleanVar(value=False)  # 聖光揭露偵測
-        self.var_geofence_en=tk.BooleanVar(value=False)     # 地理圍欄
-        self.var_geofence_radius=tk.IntVar(value=10)        # 圍欄半徑（小地圖%）
-        self.var_human_pause=tk.BooleanVar(value=False)     # 擬人化停頓
-        self.var_human_pause_min=tk.IntVar(value=15)        # 每幾分鐘停一次
-        self.var_human_pause_sec=tk.IntVar(value=5)         # 停幾秒
-        self.var_max_hours=tk.DoubleVar(value=0)            # 最大運行時數（0=無限）
 
         self.var_hp_key=tk.StringVar(value='F5')
         self.var_hp_thr=tk.IntVar(value=60)
@@ -962,45 +874,37 @@ class BotApp:
 
     def _build(self):
         # ═══ 左側導航 ═══
-        nav=tk.Frame(self.root,bg=BG1,width=140)
+        nav=tk.Frame(self.root,bg=BG1,width=130)
         nav.pack(side='left',fill='y')
         nav.pack_propagate(False)
 
-        tk.Label(nav,text=f"天堂Bot",bg=BG1,fg=ACC,font=(_UI_FONT,15,'bold')).pack(pady=(8,0))
-        tk.Label(nav,text=f"v{BOT_VERSION}",bg=BG1,fg='#555',font=('Consolas',9)).pack(pady=(0,10))
+        tk.Label(nav,text=f"天堂Bot v{BOT_VERSION}",bg=BG1,fg=ACC,font=('Microsoft JhengHei',14,'bold')).pack(pady=(10,15))
 
         self.pages={}
         self.nav_btns={}
-        page_names=['狀態','戰鬥','生存','技能','偵測','安全','模式','路徑','百科']
+        page_names=['狀態','戰鬥','生存','技能','安全','模式','路徑','百科']
         self.content=tk.Frame(self.root,bg=BG2)
         self.content.pack(side='right',fill='both',expand=True)
 
-        # 導航圖示
-        nav_icons={'狀態':'[ ]','戰鬥':'[x]','生存':'[+]','技能':'[*]','偵測':'[?]',
-                   '安全':'[!]','模式':'[~]','路徑':'[>]','百科':'[i]'}
         for name in page_names:
-            icon=nav_icons.get(name,'')
-            btn=tk.Button(nav,text=f" {icon} {name}",font=FONTS,bg=BG1,fg=FG,activebackground=ACC2,
-                          activeforeground='white',relief='flat',anchor='w',padx=10,
+            btn=tk.Button(nav,text=name,font=FONTS,bg=BG1,fg=FG,activebackground=ACC2,
+                          activeforeground='white',relief='flat',anchor='w',padx=15,
                           command=lambda n=name:self._show_page(n))
             btn.pack(fill='x',pady=1)
             self.nav_btns[name]=btn
             page=tk.Frame(self.content,bg=BG2)
             self.pages[name]=page
 
-        # 啟動按鈕 + 狀態指示
+        # 啟動按鈕在導航底部
         tk.Frame(nav,bg=BG1).pack(fill='both',expand=True)
-        self.nav_state_lbl=tk.Label(nav,text="IDLE",bg=BG1,fg='#555',font=('Consolas',8))
-        self.nav_state_lbl.pack(pady=(0,3))
-        self.start_btn=tk.Button(nav,text="▶ 啟動",font=(_UI_FONT,11,'bold'),
+        self.start_btn=tk.Button(nav,text="▶ 啟動",font=('Microsoft JhengHei',10,'bold'),
                                  bg='#27ae60',fg='white',relief='flat',command=self._toggle)
-        self.start_btn.pack(fill='x',padx=8,pady=(0,10),ipady=5)
+        self.start_btn.pack(fill='x',padx=8,pady=(0,10),ipady=4)
 
         self._build_status()
         self._build_combat()
         self._build_survival()
         self._build_skills()
-        self._build_detect()
         self._build_safety()
         self._build_mode()
         self._build_path()
@@ -1019,14 +923,14 @@ class BotApp:
     def _spin(self,p,v,fr,to,w=4,inc=1):return tk.Spinbox(p,textvariable=v,from_=fr,to=to,increment=inc,width=w,font=FONTM,bg=BG3,fg=FG)
     def _frame(self,p):f=tk.Frame(p,bg=BG2);return f
     def _section(self,p,t):
-        f=tk.LabelFrame(p,text=t,bg=BG2,fg=ACC,font=(_UI_FONT,9,'bold'),padx=6,pady=4)
+        f=tk.LabelFrame(p,text=t,bg=BG2,fg=ACC,font=('Microsoft JhengHei',9,'bold'),padx=6,pady=4)
         return f
 
     # ═══ 狀態頁 ═══
     def _build_status(self):
         p=self.pages['狀態']
 
-        # ── 職業 + 地圖 ──
+        # 職業+地圖選擇
         f=self._frame(p);f.pack(fill='x',padx=10,pady=(10,5))
         self._lbl(f,"職業:").pack(side='left')
         c=self._combo(f,self.var_class,CLASSES,w=8);c.pack(side='left',padx=2)
@@ -1036,62 +940,35 @@ class BotApp:
         if not maps:maps=['墮落的祝福之地','說話之島','象牙塔','遺忘之島']
         self._combo(f,self.var_map,maps,w=14).pack(side='left',padx=2)
 
-        # ── HP/MP 大條 ──
-        bar_frame=self._section(p,"血量 / 魔力");bar_frame.pack(fill='x',padx=10,pady=5)
-        HP_W=200
+        # HP/MP 條
+        bar_f=self._frame(p);bar_f.pack(fill='x',padx=10,pady=5)
         for lbl,clr in [("HP",ACC),("MP","#3498db")]:
-            r=self._frame(bar_frame);r.pack(fill='x',pady=3)
-            tk.Label(r,text=lbl,bg=BG2,fg=clr,font=('Consolas',12,'bold'),width=3).pack(side='left')
-            cv=tk.Canvas(r,width=HP_W,height=22,bg='#111',highlightthickness=1,highlightbackground='#333')
-            cv.pack(side='left',padx=5)
-            tl=tk.Label(r,text="100%",bg=BG2,fg='#eee',font=('Consolas',10));tl.pack(side='left',padx=5)
+            tk.Label(bar_f,text=lbl,bg=BG2,fg=clr,font=('Consolas',10,'bold')).pack(side='left')
+            cv=tk.Canvas(bar_f,width=120,height=16,bg='#222',highlightthickness=0);cv.pack(side='left',padx=3)
+            tl=tk.Label(bar_f,text="100%",bg=BG2,fg='#eee',font=('Consolas',9));tl.pack(side='left',padx=(0,10))
             if lbl=="HP":self.hp_cv,self.hp_tl=cv,tl
             else:self.mp_cv,self.mp_tl=cv,tl
 
-        # ── 狀態 + 統計 ──
-        stat_frame=self._section(p,"運行狀態");stat_frame.pack(fill='x',padx=10,pady=5)
-        self.status_lbl=tk.Label(stat_frame,text="已停止",bg=BG2,fg='#aaa',font=(_UI_FONT,13,'bold'))
-        self.status_lbl.pack(pady=(3,0))
-        self.stat_lbl=tk.Label(stat_frame,text="殺:0  紅:0  藍:0  治:0  Buff:0  撿:0",bg=BG2,fg='#aaa',font=FONTM)
+        # 統計
+        self.stat_lbl=tk.Label(p,text="殺:0 紅:0 藍:0 治:0 B:0 撿:0",bg=BG2,fg='#888',font=FONTM)
         self.stat_lbl.pack(pady=2)
-        self.time_lbl=tk.Label(stat_frame,text="00:00:00 | 0.0 殺/時",bg=BG2,fg='#555',font=FONTM)
-        self.time_lbl.pack(pady=(0,3))
+        self.time_lbl=tk.Label(p,text="00:00:00 | 0.0 殺/時",bg=BG2,fg='#555',font=FONTM)
+        self.time_lbl.pack()
+        self.status_lbl=tk.Label(p,text="已停止",bg=BG2,fg='#aaa',font=('Microsoft JhengHei',11,'bold'))
+        self.status_lbl.pack(pady=5)
 
-        # ── 系統資訊 ──
-        sys_f=self._frame(p);sys_f.pack(fill='x',padx=10,pady=2)
-        if HAS_INTERCEPTION:
-            cap = 'DXcam' if HAS_DXCAM else 'MSS'
-            info=f"Interception OK | {cap} | 怪物庫:{len(MONSTER_NAMES)}"
-            info_fg='#27ae60'
-        else:
-            info="Interception 未安裝 — 遊戲可能無法操控滑鼠"
-            info_fg='#e74c3c'
-        tk.Label(sys_f,text=info,bg=BG2,fg=info_fg,font=('Consolas',8)).pack(side='left')
+        # 系統資訊
+        info=f"點擊:{'interception' if HAS_INTERCEPTION else 'mouse_lib'} | 怪物庫:{len(MONSTER_NAMES)}隻"
+        tk.Label(p,text=info,bg=BG2,fg='#27ae60' if HAS_INTERCEPTION else '#f5a623',font=('Consolas',7)).pack()
 
-        # ── 工具按鈕 ──
-        tool_f=self._frame(p);tool_f.pack(fill='x',padx=10,pady=3)
-        tk.Button(tool_f,text="HP校準",font=FONTS,bg='#8e44ad',fg='white',command=self._debug_hp).pack(side='left',padx=2)
-        tk.Button(tool_f,text="重新校準條",font=FONTS,bg=ACC2,fg='white',
-                  command=lambda:self._recalibrate_bars()).pack(side='left',padx=2)
+        # Debug
+        r=self._frame(p);r.pack(fill='x',padx=10,pady=2)
+        tk.Button(r,text="HP偵測截圖",font=FONTS,bg='#8e44ad',fg='white',command=self._debug_hp).pack(side='left',padx=3)
 
-        # ── 日誌 ──
-        sf=self._section(p,"日誌");sf.pack(fill='both',padx=10,pady=(3,10),expand=True)
+        # 日誌
+        sf=self._section(p,"日誌");sf.pack(fill='both',padx=10,pady=(5,10),expand=True)
         self.log_w=tk.Text(sf,height=8,bg='#0d1117',fg='#58a6ff',font=('Consolas',8),state='disabled',wrap='word')
         self.log_w.pack(fill='both',expand=True)
-
-    def _recalibrate_bars(self):
-        """重新校準 HP/MP 條位置"""
-        g = find_game()
-        if not g:
-            self.log("找不到遊戲視窗！"); return
-        bars._calibrated = False
-        bars.calibrate(None, *get_rect(g[0]))
-        if bars._hp_bar:
-            self.log(f"HP條: X={bars._hp_bar[0]:.3f}-{bars._hp_bar[1]:.3f} Y={bars._hp_bar[2]:.3f}")
-        if bars._mp_bar:
-            self.log(f"MP條: X={bars._mp_bar[0]:.3f}-{bars._mp_bar[1]:.3f} Y={bars._mp_bar[2]:.3f}")
-        if not bars._hp_bar:
-            self.log("HP條校準失敗，使用預設位置")
 
     def _debug_hp(self):
         """截圖並標記 HP/MP 條偵測位置，存到桌面"""
@@ -1254,96 +1131,19 @@ class BotApp:
             self._spin(r,self.var_timer_cnt[i],1,10,w=2).pack(side='left')
             self._lbl(r,"下").pack(side='left')
 
-    # ═══ 偵測頁（新功能）═══
-    def _build_detect(self):
-        p=self.pages['偵測']
-
-        # 畫面差異偵測
-        sf=self._section(p,"快速找怪（畫面差異）");sf.pack(fill='x',padx=10,pady=5)
-        r=self._frame(sf);r.pack(fill='x',pady=2)
-        self._chk(r,"啟用畫面差異偵測（比螺旋掃描快）",self.var_fast_detect).pack(side='left')
-        tk.Label(sf,text="連續截兩幀比對移動區域，自動偵測怪物\n找不到時自動 fallback 回螺旋掃描",
-                 bg=BG2,fg='#888',font=FONTS).pack(anchor='w',padx=5)
-
-        # 防 PK
-        sf2=self._section(p,"防 PK 偵測");sf2.pack(fill='x',padx=10,pady=5)
-        r=self._frame(sf2);r.pack(fill='x',pady=2)
-        self._chk(r,"啟用反PK",self.var_antipk).pack(side='left')
-        self._lbl(r,"動作:").pack(side='left',padx=(8,1))
-        self._combo(r,self.var_pk_act,['回城','逃跑','警示'],w=5).pack(side='left')
-        r=self._frame(sf2);r.pack(fill='x',pady=2)
-        self._lbl(r,"冷卻:").pack(side='left')
-        self._spin(r,self.var_pk_cooldown,5,120,w=4).pack(side='left')
-        self._lbl(r,"秒").pack(side='left')
-        tk.Label(sf2,text="偵測新玩家名字出現（白字+深色背景框）\n觸發後進入冷卻，避免重複",
-                 bg=BG2,fg='#888',font=FONTS).pack(anchor='w',padx=5)
-
-        # 自動復活
-        sf3=self._section(p,"死亡處理");sf3.pack(fill='x',padx=10,pady=5)
-        r=self._frame(sf3);r.pack(fill='x',pady=2)
-        self._chk(r,"自動復活",self.var_auto_rez).pack(side='left')
-        self._lbl(r,"等待:").pack(side='left',padx=(8,1))
-        self._spin(r,self.var_rez_delay,1,30,w=3).pack(side='left')
-        self._lbl(r,"秒後復活").pack(side='left')
-        tk.Label(sf3,text="死亡後自動回村（遊戲機制），等待指定秒數\n回村後 Buff → 重播路徑回練功點（需先錄製路徑）",
-                 bg=BG2,fg='#888',font=FONTS).pack(anchor='w',padx=5)
-        r=self._frame(sf3);r.pack(fill='x',pady=2)
-        self._chk(r,"死亡卡住自動關遊戲（啟動5分鐘後，HP=0+畫面靜止→關閉遊戲）",self.var_dead_stuck).pack(side='left')
-
-        # 自動回城補給
-        sf4=self._section(p,"自動回城補給");sf4.pack(fill='x',padx=10,pady=5)
-        r=self._frame(sf4);r.pack(fill='x',pady=2)
-        self._chk(r,"啟用",self.var_supply_en).pack(side='left')
-        self._lbl(r,"每喝").pack(side='left',padx=(8,1))
-        self._spin(r,self.var_supply_count,20,500,w=4,inc=10).pack(side='left')
-        self._lbl(r,"次水後回城").pack(side='left')
-        tk.Label(sf4,text="到達次數後用回城卷返回城鎮，發出警示音\n手動買完補給後按開始鍵繼續掛機",
-                 bg=BG2,fg='#888',font=FONTS).pack(anchor='w',padx=5)
-
-        # 聖光揭露偵測
-        sf5=self._section(p,"聖光揭露卷軸偵測");sf5.pack(fill='x',padx=10,pady=5)
-        r=self._frame(sf5);r.pack(fill='x',pady=2)
-        self._chk(r,"啟用（偵測驗證碼視窗 → 暫停+警報）",self.var_captcha_detect).pack(side='left')
-        tk.Label(sf5,text="其他玩家可用聖光揭露卷軸觸發人機驗證\n偵測到驗證視窗後自動暫停 Bot 並發出警報音",
-                 bg=BG2,fg='#888',font=FONTS).pack(anchor='w',padx=5)
-
-        # 地理圍欄
-        sf6=self._section(p,"地理圍欄（練功範圍限制）");sf6.pack(fill='x',padx=10,pady=5)
-        r=self._frame(sf6);r.pack(fill='x',pady=2)
-        self._chk(r,"啟用",self.var_geofence_en).pack(side='left')
-        self._lbl(r,"半徑:").pack(side='left',padx=(8,1))
-        self._spin(r,self.var_geofence_radius,3,30,w=3).pack(side='left')
-        self._lbl(r,"% 小地圖").pack(side='left')
-        tk.Label(sf6,text="以啟動位置為中心，限制練功範圍\n超出範圍自動走回，用小地圖座標判定",
-                 bg=BG2,fg='#888',font=FONTS).pack(anchor='w',padx=5)
-
     # ═══ 安全頁 ═══
     def _build_safety(self):
         p=self.pages['安全']
-
-        # 擬人化防偵測
-        sf=self._section(p,"擬人化防偵測");sf.pack(fill='x',padx=10,pady=5)
+        sf=self._section(p,"防護設定");sf.pack(fill='x',padx=10,pady=5)
         r=self._frame(sf);r.pack(fill='x',pady=2)
-        self._chk(r,"隨機延遲（所有操作 ±20% 擾動）",self.var_humanize).pack(side='left')
+        self._chk(r,"反PK偵測",self.var_antipk).pack(side='left')
+        self._lbl(r,"動作:").pack(side='left',padx=(8,1))
+        self._combo(r,self.var_pk_act,['回城','逃跑','警示'],w=5).pack(side='left')
         r=self._frame(sf);r.pack(fill='x',pady=2)
-        self._chk(r,"定期停頓（模擬 AFK）",self.var_human_pause).pack(side='left')
-        self._lbl(r,"每").pack(side='left',padx=(8,1))
-        self._spin(r,self.var_human_pause_min,5,60,w=3).pack(side='left')
-        self._lbl(r,"分鐘停").pack(side='left')
-        self._spin(r,self.var_human_pause_sec,3,30,w=3).pack(side='left')
-        self._lbl(r,"秒").pack(side='left')
-        r=self._frame(sf);r.pack(fill='x',pady=2)
-        self._lbl(r,"最大運行時數:").pack(side='left')
-        self._spin(r,self.var_max_hours,0,24,w=4,inc=0.5).pack(side='left')
-        self._lbl(r,"小時（0=無限）").pack(side='left')
-        tk.Label(sf,text="NCSoft 會分析行為模式：固定間隔、24小時不停等\n建議開啟隨機延遲 + 定期停頓，配合 ATS 3小時時段",
-                 bg=BG2,fg='#666',font=FONTS).pack(anchor='w',padx=5,pady=3)
-
-        # 其他防護
-        sf2=self._section(p,"其他防護");sf2.pack(fill='x',padx=10,pady=5)
-        r=self._frame(sf2);r.pack(fill='x',pady=2)
         self._chk(r,"斷線偵測 + 警示音",self.var_dc_detect).pack(side='left')
-        r=self._frame(sf2);r.pack(fill='x',pady=2)
+        r=self._frame(sf);r.pack(fill='x',pady=2)
+        self._chk(r,"擬人化操作（隨機延遲+微抖動）",self.var_humanize).pack(side='left')
+        r=self._frame(sf);r.pack(fill='x',pady=2)
         self._chk(r,"事件截圖日誌",self.var_sslog).pack(side='left')
 
         sf2=self._section(p,"快捷鍵 / 設定");sf2.pack(fill='x',padx=10,pady=5)
@@ -1358,7 +1158,7 @@ class BotApp:
 
         # 更新（獨立一行）
         r=self._frame(sf2);r.pack(fill='x',pady=5)
-        tk.Button(r,text=">>> 檢查更新 <<<",font=(_UI_FONT,10,'bold'),bg='#e67e22',fg='white',command=self._check_update).pack(side='left',padx=3)
+        tk.Button(r,text=">>> 檢查更新 <<<",font=('Microsoft JhengHei',10,'bold'),bg='#e67e22',fg='white',command=self._check_update).pack(side='left',padx=3)
         self._lbl(r,f"v{BOT_VERSION}").pack(side='left',padx=8)
         self.update_lbl=tk.Label(r,text="",bg=BG2,fg='#2ecc71',font=FONTS)
         self.update_lbl.pack(side='left',padx=4)
@@ -1659,15 +1459,6 @@ class BotApp:
         self.wiki_result.config(state='disabled')
 
     # ═══ 通用 ═══
-    def _click_hotbar_current(self, slot_key, clicks=2):
-        """用目前視窗座標點快捷欄（給 SkillSystem 等外部呼叫用）"""
-        rect = getattr(self, '_cur_rect', None)
-        if not rect:
-            g = find_game()
-            if not g: return False
-            rect = get_rect(g[0])
-        return self._click_hotbar(*rect, slot_key, clicks)
-
     def _set_state(self, new_state):
         """安全的狀態轉換"""
         old = getattr(self, 'bot_state', BotState.IDLE)
@@ -1688,15 +1479,16 @@ class BotApp:
             self.log_w.see('end');self.log_w.config(state='disabled')
         self.root.after(0,_u)
 
-    def _bar(self,cv,tl,pct,w=200,cur=0,mx=0):
+    def _bar(self,cv,tl,pct,w=120,cur=0,mx=0):
         def _u():
             p=max(0,min(1,pct));cv.delete('all')
-            cv.create_rectangle(0,0,w,22,fill='#111',outline='')
+            cv.create_rectangle(0,0,w,16,fill='#222',outline='')
             c=ACC if p<0.3 else('#f5a623' if p<0.6 else'#27ae60')
-            cv.create_rectangle(0,0,int(w*p),22,fill=c,outline='')
-            # 條上面顯示百分比文字
-            cv.create_text(w//2,11,text=f"{p*100:.0f}%",fill='white',font=('Consolas',9,'bold'))
-            tl.config(text=f"{p*100:.0f}%")
+            cv.create_rectangle(0,0,int(w*p),16,fill=c,outline='')
+            if mx > 0:
+                tl.config(text=f"{cur}/{mx} ({p*100:.0f}%)")
+            else:
+                tl.config(text=f"{p*100:.0f}%")
         self.root.after(0,_u)
 
     def _stats(self):
@@ -1714,9 +1506,6 @@ class BotApp:
             self.status_lbl.config(text=t,fg=c)
             self.start_btn.config(text="■ 停止" if self.running else "▶ 啟動",
                                   bg=ACC if self.running else '#27ae60')
-            # 更新導航欄狀態
-            state = getattr(self, 'bot_state', BotState.IDLE).value.upper()
-            self.nav_state_lbl.config(text=state, fg='#27ae60' if self.running else '#555')
         self.root.after(0,_u)
 
     def _toggle(self):
@@ -1725,8 +1514,7 @@ class BotApp:
         else:
             self.running=True;self.t0=time.time();self.bot_state=BotState.IDLE;self._status("運行中",'#27ae60');self.log("Bot 啟動")
             self._last_activity = time.time()
-            skills.setup([(self.var_sk[i].get(),self.var_cd[i].get()) for i in range(7)],
-                         hotbar_fn=self._click_hotbar_current)
+            skills.setup([(self.var_sk[i].get(),self.var_cd[i].get()) for i in range(7)])
             if not self.thread or not self.thread.is_alive():
                 self.thread=threading.Thread(target=self._loop,daemon=True);self.thread.start()
             self._tick()
@@ -1813,10 +1601,9 @@ class BotApp:
         return False
 
     def _get_hotbar_pos(self, cx, cy, cw, ch, slot_key):
-        """取得快捷欄格子的螢幕座標 (F1-F12)
-        上排: F1 F2 F3 F4 F5 F6 F7 F8
+        """取得快捷欄格子的螢幕座標 (F5-F12)
+        上排: F5 F6 F7 F8
         下排: F9 F10 F11 F12
-        F5在F9正上方, F1在F5左邊繼續延伸
         """
         right_edge = cx + cw - 10
         big_w = int(cw * 0.052)
@@ -1826,16 +1613,10 @@ class BotApp:
         # F12→F9 的 X 位置（從右往左）
         x12 = right_edge - big_w // 2
         x_map = {12: x12, 11: x12 - big_w, 10: x12 - big_w*2, 9: x12 - big_w*3}
-        # 上排 F5-F8 跟下排 F9-F12 同 X
         x_map[5] = x_map[9]
         x_map[6] = x_map[10]
         x_map[7] = x_map[11]
         x_map[8] = x_map[12]
-        # 上排 F1-F4 在 F5 左邊繼續延伸
-        x_map[4] = x_map[5] - big_w
-        x_map[3] = x_map[5] - big_w * 2
-        x_map[2] = x_map[5] - big_w * 3
-        x_map[1] = x_map[5] - big_w * 4
 
         # 解析 slot_key（"F5" → 5）
         try:
@@ -1860,14 +1641,16 @@ class BotApp:
 
         x, y = pos
         # 確保滑鼠完全放開（攻擊拖曳可能還在）
-        game_up()
+        interception.mouse_up('left')
         time.sleep(0.2)
         # 移到快捷欄
         move_exact(x, y)
         time.sleep(0.25)
         # 連點
         for i in range(clicks):
-            game_click()
+            interception.mouse_down('left')
+            time.sleep(0.04)
+            interception.mouse_up('left')
             if i < clicks - 1:
                 time.sleep(0.12)
         time.sleep(0.15)
@@ -1884,25 +1667,24 @@ class BotApp:
         """生存系統：HP/MP/治療/喝水/Buff — 每次循環都呼叫"""
         now = time.time()
         hp = mp = 1.0
-        pixel_ok = False
         if self.var_ocr_en.get():
             try:
                 hp = bars.hp(None, cx, cy, cw, ch)
+                self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max)
                 mp = bars.mp(None, cx, cy, cw, ch)
-                # 校準成功且有合理值才算 pixel_ok
-                if bars._calibrated and bars._hp_bar is not None and hp < 1.0:
-                    pixel_ok = True
-                self._bar(self.hp_cv, self.hp_tl, hp)
                 if mp >= 0:
-                    self._bar(self.mp_cv, self.mp_tl, mp)
+                    self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max)
             except:
                 pass
+        else:
+            # OCR 關閉，強制設為 0（觸發定時喝水）
+            bars._hp_max = 0
+            bars._mp_max = 0
         # debug：每 10 秒顯示 HP/MP 讀值，方便排查
         if not hasattr(self, '_last_hp_debug'):
             self._last_hp_debug = 0
         if now - self._last_hp_debug > 10:
-            mode_str = "像素" if pixel_ok else "定時"
-            self.log(f"[HP={hp*100:.0f}% MP={mp*100:.0f}% 模式={mode_str} | {getattr(bars,'_last_ocr_text','')}]")
+            self.log(f"[HP={bars._hp_cur}/{bars._hp_max} MP={bars._mp_cur}/{bars._mp_max} OCR={getattr(bars,'_last_ocr_text','')}]")
             self._last_hp_debug = now
 
         # Buff（不需要 HP 值，定時觸發）
@@ -1912,17 +1694,20 @@ class BotApp:
             time.sleep(0.3)
             timers['buff'] = now
             self.buffs += 1
-            self.log(f"喝綠水({k})")
+            self.log(f"喝綠水({key})")
 
-        # 死亡（僅在像素偵測正常時判定，避免誤判）
-        if pixel_ok and hp <= 0.01:
-            self._handle_death(hwnd, cx, cy, cw, ch, timers)
+        # 死亡（僅在 HP 成功讀取時判定）
+        if hp >= 0 and hp <= 0.01:
+            self.log("角色死亡！")
+            alert('death')
+            self.running = False
+            self._status("死亡！", ACC)
             return hp, mp
 
         # 緊急回城（最高優先，僅在 HP 成功讀取時觸發）
         if self.var_recall_en.get() and hp >= 0 and hp < self.var_recall_thr.get() / 100:
             ctypes.windll.user32.SetForegroundWindow(hwnd)
-            self._click_hotbar(cx, cy, cw, ch, self.var_recall_key.get(), clicks=2)
+            press_key(self.var_recall_key.get())
             self.log(f"緊急回城！HP={hp*100:.0f}%")
             alert('hp')
             # 不停止 bot，等待回城後可以重播路徑回來
@@ -1930,24 +1715,23 @@ class BotApp:
             return hp, mp
 
         # 治癒術（HP 低於閾值 / OCR 關閉時定時施放）
-        hp_thr = self.var_hp_thr.get() / 100
-        mp_thr = self.var_mp_thr.get() / 100
-        heal_thr = self.var_heal_thr.get() / 100
-
-        heal_trigger = (pixel_ok and hp < heal_thr) \
-                       or (not pixel_ok and now - timers['heal'] > self.var_heal_sec.get())
+        heal_trigger = (hp >= 0 and hp < self.var_heal_thr.get() / 100) \
+                       or (bars._hp_max == 0 and now - timers['heal'] > self.var_heal_sec.get())
         if self.var_heal_en.get() and heal_trigger and now - timers['heal'] > 3:
             k = self.var_heal_key.get()
             for _ in range(self.var_heal_n.get()):
-                self._click_hotbar(cx, cy, cw, ch, k, clicks=5)
+                self._click_hotbar(cx, cy, cw, ch, k, clicks=5)  # 法術類5下
                 time.sleep(0.3)
             timers['heal'] = now
             self.heals += 1
             self.log(f"治癒術({k}) HP={hp*100:.0f}%")
 
-        # 紅水 — 像素偵測有效用比例，無效用定時
-        if pixel_ok:
-            need_hp = hp < hp_thr
+        # 紅水 — OCR 有讀到就用數值判斷，讀不到就定時喝
+        hp_cur = bars._hp_cur
+        hp_max = bars._hp_max
+        hp_thr = self.var_hp_thr.get() / 100
+        if hp_max > 0:
+            need_hp = hp_cur < hp_max * hp_thr and hp_cur > 0
         else:
             need_hp = now - timers['hp'] > self.var_hp_sec.get()
         if self.var_hp_en.get() and need_hp and now - timers['hp'] > 4:
@@ -1955,14 +1739,17 @@ class BotApp:
             self._click_hotbar(cx, cy, cw, ch, k)
             timers['hp'] = now
             self.pots += 1
-            if pixel_ok:
-                self.log(f"喝紅水({k}) HP={hp*100:.0f}%")
+            if hp_max > 0:
+                self.log(f"喝紅水({k}) HP={hp_cur}/{hp_max}")
             else:
-                self.log(f"喝紅水({k}) 定時")
+                self.log(f"喝紅水({k}) 定時保底")
 
         # 藍水
-        if pixel_ok:
-            need_mp = mp < mp_thr
+        mp_cur = bars._mp_cur
+        mp_max = bars._mp_max
+        mp_thr = self.var_mp_thr.get() / 100
+        if mp_max > 0:
+            need_mp = mp_cur < mp_max * mp_thr and mp_cur > 0
         else:
             need_mp = now - timers['mp'] > self.var_mp_sec.get()
         if self.var_mp_en.get() and need_mp and now - timers['mp'] > 4:
@@ -1970,17 +1757,14 @@ class BotApp:
             self._click_hotbar(cx, cy, cw, ch, k)
             timers['mp'] = now
             self.mpots += 1
-            if pixel_ok:
-                self.log(f"喝藍水({k}) MP={mp*100:.0f}%")
-            else:
-                self.log(f"喝藍水({k}) 定時")
+            self.log(f"喝藍水({k}) MP={mp_cur}/{mp_max}")
 
         # Buff
         # 召喚重召喚
         mode = self.var_mode.get()
         if mode == '召喚' and now - timers['summon'] > self.var_sum_sec.get():
             ctypes.windll.user32.SetForegroundWindow(hwnd)
-            self._click_hotbar(cx, cy, cw, ch, self.var_sum_key.get(), clicks=4)
+            press_key(self.var_sum_key.get())
             timers['summon'] = now
             self.log("重召喚")
 
@@ -2000,7 +1784,7 @@ class BotApp:
                 time.sleep(0.1)
                 cnt = self.var_timer_cnt[i].get()
                 for _ in range(cnt):
-                    self._click_hotbar(cx, cy, cw, ch, tkey, clicks=2)
+                    press_key(tkey)
                     time.sleep(0.15)
                 timers[timer_name] = now
                 self.log(f"定時按鍵#{i+1}: {tkey} x{cnt}")
@@ -2018,20 +1802,19 @@ class BotApp:
         elif mode == '遠程':
             attack(mx, my, cx, cy, cw, ch)
             time.sleep(0.2)
-            self._click_hotbar(cx, cy, cw, ch, self.var_rng_key.get(), clicks=4)
-            # 風箏走位（後退保持距離）
-            if self.var_rng_kite.get():
-                sh = int(ch * 0.75)
-                d = self.var_rng_dist.get()
-                dx, dy = cx + cw // 2 - mx, cy + sh // 2 - my
-                dd = max(1, math.sqrt(dx * dx + dy * dy))
-                sx = max(cx + 50, min(cx + cw - 50, mx + int(dx / dd * d)))
-                sy = max(cy + 30, min(cy + sh - 30, my + int(dy / dd * d)))
-                move_exact(sx, sy)
-                game_click(sx, sy)
+            press_key(self.var_rng_key.get())
+            # 後退保持距離
+            sh = int(ch * 0.75)
+            d = self.var_rng_dist.get()
+            dx, dy = cx + cw // 2 - mx, cy + sh // 2 - my
+            dd = max(1, math.sqrt(dx * dx + dy * dy))
+            sx = max(cx + 50, min(cx + cw - 50, mx + int(dx / dd * d)))
+            sy = max(cy + 30, min(cy + sh - 30, my + int(dy / dd * d)))
+            move_exact(sx, sy)
+            game_click(sx, sy)
         elif mode in ('定點', '純定點', '墮落之地'):
-            # 定點：點攻擊鍵快捷欄 → 移到怪物 → 按住 → 拖曳 → 放開
-            self._click_hotbar(cx, cy, cw, ch, self.var_rng_key.get(), clicks=4)
+            # 定點：按攻擊鍵 → 移到怪物 → 按住 → 拖曳 → 放開
+            press_key(self.var_rng_key.get())
             time.sleep(0.1)
             move_exact(mx, my)
             time.sleep(0.08)
@@ -2046,7 +1829,7 @@ class BotApp:
             game_up()
         elif mode == '召喚':
             attack(mx, my, cx, cy, cw, ch)
-            self._click_hotbar(cx, cy, cw, ch, self.var_sum_atk.get(), clicks=4)
+            press_key(self.var_sum_atk.get())
             sh = int(ch * 0.75)
             move_exact(cx + cw // 2, cy + sh // 2)
             game_click()
@@ -2055,13 +1838,13 @@ class BotApp:
             if role in ('坦克', '輸出'):
                 attack(mx, my, cx, cy, cw, ch)
             elif role == '補師':
-                self._click_hotbar(cx, cy, cw, ch, self.var_pt_heal.get(), clicks=4)
+                press_key(self.var_pt_heal.get())
             elif role == '輔助':
-                self._click_hotbar(cx, cy, cw, ch, self.var_pt_buff.get(), clicks=4)
+                press_key(self.var_pt_buff.get())
                 attack(mx, my, cx, cy, cw, ch)
 
     def _combat_skill(self):
-        """戰鬥中持續施放技能（用鍵盤，不動滑鼠）"""
+        """戰鬥中持續施放技能（依模式）"""
         mode = self.var_mode.get()
         if mode == '近戰':
             skills.use_next()
@@ -2071,400 +1854,6 @@ class BotApp:
             press_key(self.var_sum_atk.get())
         elif mode == '隊伍' and self.var_pt_role.get() == '補師':
             press_key(self.var_pt_heal.get())
-
-    # ═══ 新功能：死亡復活 / 防PK / 畫面差異偵測 / 回城補給 ═══
-
-    def _handle_death(self, hwnd, cx, cy, cw, ch, timers):
-        """死亡處理：天堂經典版死亡後角色自動傳回村莊
-        流程：偵測死亡 → 等待回村 → 喝水Buff → 重播路徑回練功點 or 暫停
-        （不需要點復活按鈕，遊戲自動回村）
-        """
-        if not self.var_auto_rez.get():
-            self.log("角色死亡！（自動復活未開啟）")
-            alert('death')
-            self.running = False
-            self._status("死亡！", ACC)
-            return False
-
-        self._set_state(BotState.DEAD)
-        self._status("死亡 — 回村中", '#e74c3c')
-        self.log("角色死亡！等待自動回村...")
-        alert('death')
-
-        # 等待回村（遊戲會自動傳送，通常需要幾秒）
-        delay = self.var_rez_delay.get()
-        time.sleep(delay)
-
-        if not self.running:
-            return False
-
-        # 重新取得視窗（回村後位置可能改變）
-        g = find_game()
-        if not g:
-            self.running = False
-            return False
-        hwnd = g[0]
-        cx, cy, cw, ch = get_rect(hwnd)
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
-        time.sleep(1)
-
-        self.log("已回村！重新 Buff...")
-
-        # 回村後喝水 + Buff
-        if self.var_buff_en.get():
-            self._click_hotbar(cx, cy, cw, ch, self.var_buff_key.get(), clicks=5)
-            timers['buff'] = time.time()
-            time.sleep(0.5)
-
-        # 重新校準 HP 條（村莊 UI 可能不同）
-        bars._calibrated = False
-
-        # 如果有錄製的路徑，自動重播回練功點
-        if self.var_path_en.get() and path.pts:
-            self.log("重播路徑回練功點...")
-            self._status("回練功點", '#f5a623')
-            path.play(cx, cy, cw, ch, hwnd)
-            time.sleep(1)
-            # 到達後重新記錄小地圖位置
-            self.minimap_anchor = self._get_minimap_pos(cx, cy, cw, ch)
-            self._set_state(BotState.SCANNING)
-            self._status("復活完成，繼續掛機", '#27ae60')
-        else:
-            # 沒有路徑 → 暫停等使用者手動走回
-            self.log("沒有錄製路徑，請手動走回練功點後按開始鍵")
-            self._status("已回村 — 請手動走回練功點", '#e67e22')
-            alert('dc')
-            self.running = False
-
-        return True
-
-    def _check_pk(self, cx, cy, cw, ch):
-        """防 PK 偵測：找畫面中的玩家名字（白字+深色均勻背景）
-        回傳 True 如果偵測到玩家（非怪物）
-        """
-        if not self.var_antipk.get():
-            return False
-
-        # 冷卻檢查
-        now = time.time()
-        last_pk = getattr(self, '_last_pk_check', 0)
-        if now - last_pk < self.var_pk_cooldown.get():
-            return False
-
-        try:
-            sh = int(ch * 0.75)
-            frame = grab_region(cx, cy, cw, sh)
-            if frame is None:
-                return False
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-            # 高閾值二值化找白色文字
-            _, white_mask = cv2.threshold(gray, 248, 255, cv2.THRESH_BINARY)
-
-            # 排除角色中心
-            ccx, ccy = cw // 2, sh // 2
-            cv2.circle(white_mask, (ccx, ccy), 100, 0, -1)
-
-            # 形態學：連接文字
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 5))
-            closed = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel)
-            contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            player_count = 0
-            for cnt in contours:
-                x, y, w, h = cv2.boundingRect(cnt)
-                if w < 25 or w > 300 or h < 4 or h > 30:
-                    continue
-
-                # 背景分析：玩家名字有深色均勻背景
-                pad = 5
-                bg_y1, bg_y2 = max(0, y-pad), min(sh, y+h+pad)
-                bg_x1, bg_x2 = max(0, x-pad), min(cw, x+w+pad)
-                bg_region = gray[bg_y1:bg_y2, bg_x1:bg_x2].copy()
-                text_mask = white_mask[bg_y1:bg_y2, bg_x1:bg_x2]
-                bg_pixels = bg_region[text_mask == 0]
-
-                if len(bg_pixels) < 10:
-                    continue
-
-                avg_bg = float(np.mean(bg_pixels))
-                std_bg = float(np.std(bg_pixels))
-
-                # 玩家名字特徵：深色均勻背景 (avg < 80, std < 30)
-                if avg_bg < 80 and std_bg < 30:
-                    player_count += 1
-
-            if player_count > 0:
-                self._last_pk_check = now
-                return True
-
-        except:
-            pass
-        return False
-
-    def _frame_diff_detect(self, cx, cy, cw, ch):
-        """畫面差異偵測：連續截兩幀比對，找移動區域
-        回傳候選怪物位置列表 [(x, y), ...] 或空列表
-        """
-        try:
-            sh = int(ch * 0.75)
-            frame1 = grab_region(cx, cy, cw, sh)
-            time.sleep(0.15)
-            frame2 = grab_region(cx, cy, cw, sh)
-
-            if frame1 is None or frame2 is None:
-                return []
-
-            # 灰度差異
-            g1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
-            g2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
-            diff = cv2.absdiff(g1, g2)
-
-            # 閾值化：只保留明顯變化
-            _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
-
-            # 排除角色中心（自己的動畫）
-            ccx, ccy = cw // 2, sh // 2
-            cv2.circle(thresh, (ccx, ccy), 80, 0, -1)
-
-            # 形態學去噪 + 連接
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10))
-            thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-            thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)))
-
-            # 找輪廓
-            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            candidates = []
-            for cnt in contours:
-                x, y, w, h = cv2.boundingRect(cnt)
-                area = w * h
-                if area < 200 or area > 50000:  # 太小=噪點, 太大=鏡頭移動
-                    continue
-                # 轉換為螢幕絕對座標
-                abs_x = cx + x + w // 2
-                abs_y = cy + y + h // 2
-                candidates.append((abs_x, abs_y, area))
-
-            # 按面積排序
-            candidates.sort(key=lambda c: -c[2])
-
-            # 去重（距離太近的合併）
-            filtered = []
-            for x, y, a in candidates:
-                if not any(abs(x-fx) < 60 and abs(y-fy) < 60 for fx, fy in filtered):
-                    filtered.append((x, y))
-
-            return filtered[:5]  # 最多 5 個候選
-        except:
-            return []
-
-    def _check_supply(self, hwnd, cx, cy, cw, ch):
-        """檢查是否需要回城補給
-        回傳 True = 需要回城（已觸發回城流程）
-        """
-        if not self.var_supply_en.get():
-            return False
-
-        threshold = self.var_supply_count.get()
-        total_used = self.pots + self.mpots
-
-        if total_used < threshold:
-            return False
-
-        # 到達閾值 — 回城
-        self._set_state(BotState.RESUPPLYING)
-        self._status("回城補給中", '#f5a623')
-        self.log(f"已喝 {total_used} 次水，回城補給！")
-        alert('hp')
-
-        # 點回城卷
-        self._click_hotbar(cx, cy, cw, ch, self.var_recall_key.get(), clicks=2)
-        time.sleep(8)  # 等待回城讀條
-
-        self.log("已回城 — 請手動買補給，買完按開始鍵繼續")
-        self._status("等待補給（按開始鍵繼續）", '#e67e22')
-
-        # 重置計數器
-        self.pots = 0
-        self.mpots = 0
-
-        # 暫停 bot，等使用者按開始鍵
-        self.running = False
-        return True
-
-    def _check_captcha(self, cx, cy, cw, ch):
-        """聖光揭露卷軸偵測：偵測畫面中央是否出現驗證碼對話框
-        對話框特徵：畫面中央出現深色半透明遮罩 + 白色文字的彈窗
-        """
-        if not self.var_captcha_detect.get():
-            return False
-
-        # 每 5 秒檢查一次（避免太頻繁）
-        now = time.time()
-        if now - getattr(self, '_last_captcha_check', 0) < 5:
-            return False
-        self._last_captcha_check = now
-
-        try:
-            # 截取畫面中央區域（驗證碼對話框通常在中央）
-            center_x = int(cw * 0.30)
-            center_y = int(ch * 0.30)
-            center_w = int(cw * 0.40)
-            center_h = int(ch * 0.40)
-            frame = grab_region(cx + center_x, cy + center_y, center_w, center_h)
-            if frame is None:
-                return False
-
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-            # TODO: 需要實際驗證碼截圖校準以下閾值
-            # 目前用「畫面中央突然出現大片遮罩」作為粗略判斷
-            # 比較前後兩次截圖的差異，避免誤判正常遊戲畫面
-            dark_ratio = (gray < 60).sum() / gray.size
-            white_ratio = (gray > 200).sum() / gray.size
-
-            # 記錄基準值（正常遊戲畫面）
-            if not hasattr(self, '_captcha_baseline'):
-                self._captcha_baseline = dark_ratio
-                return False
-
-            # 與基準值比較：dark 突增 >25% 才觸發（排除正常 UI）
-            dark_increase = dark_ratio - self._captcha_baseline
-            if dark_increase > 0.25 and white_ratio > 0.02:
-                self.log(f"[警告] 畫面異常變化（dark+{dark_increase:.0%}）可能是驗證碼！暫停 Bot")
-                alert('pk')
-                time.sleep(0.5)
-                alert('pk')
-                self.running = False
-                self._status("驗證碼？請檢查遊戲畫面", '#e74c3c')
-                return True
-            else:
-                # 更新基準值（緩慢追蹤，避免突變）
-                self._captcha_baseline = self._captcha_baseline * 0.95 + dark_ratio * 0.05
-        except:
-            pass
-        return False
-
-    def _check_geofence(self, cx, cy, cw, ch, hwnd):
-        """地理圍欄：檢查角色是否在允許範圍內
-        用小地圖座標判定，超出範圍自動走回
-        """
-        if not self.var_geofence_en.get():
-            return False
-        if not hasattr(self, 'minimap_anchor') or self.minimap_anchor is None:
-            return False
-
-        current = self._get_minimap_pos(cx, cy, cw, ch)
-        if current is None:
-            return False
-
-        dx = current[0] - self.minimap_anchor[0]
-        dy = current[1] - self.minimap_anchor[1]
-        drift = math.sqrt(dx * dx + dy * dy)
-
-        radius = self.var_geofence_radius.get() / 100.0  # 轉為比例
-
-        if drift > radius:
-            self.log(f"超出圍欄（偏移{drift:.2f}>{radius:.2f}），走回定點")
-            self._walk_back_to_anchor(cx, cy, cw, ch, hwnd)
-            return True
-        return False
-
-    def _humanize_delay(self, base_sec):
-        """擬人化延遲：在基礎延遲上加 ±20% 隨機擾動"""
-        if self.var_humanize.get():
-            jitter = base_sec * random.uniform(-0.20, 0.20)
-            return max(0.01, base_sec + jitter)
-        return base_sec
-
-    def _check_human_pause(self, timers):
-        """擬人化停頓：定期暫停模擬 AFK"""
-        if not self.var_human_pause.get():
-            return
-        now = time.time()
-        timer_key = 'human_pause'
-        if timer_key not in timers:
-            timers[timer_key] = now
-        interval = self.var_human_pause_min.get() * 60
-        if now - timers[timer_key] > interval:
-            pause_sec = self.var_human_pause_sec.get() + random.uniform(-2, 2)
-            pause_sec = max(1, pause_sec)
-            self.log(f"擬人停頓 {pause_sec:.0f} 秒...")
-            self._status("停頓中...", '#888')
-            time.sleep(pause_sec)
-            timers[timer_key] = now
-            self.log("繼續掛機")
-
-    def _check_dead_stuck(self, cx, cy, cw, ch, hwnd):
-        """啟動 5 分鐘後，如果 HP=0 且畫面無移動 → 自動關閉遊戲"""
-        if not self.var_dead_stuck.get():
-            return False
-        if not self.t0 or time.time() - self.t0 < 300:
-            return False  # 還沒 5 分鐘
-
-        hp = bars._hp_ratio
-        if hp > 0.01:
-            self._dead_stuck_count = 0
-            return False
-
-        # HP=0，檢查畫面是否靜止
-        try:
-            frame1 = grab_region(cx, cy, cw, int(ch * 0.75))
-            time.sleep(1)
-            frame2 = grab_region(cx, cy, cw, int(ch * 0.75))
-            if frame1 is None or frame2 is None:
-                return False
-            diff = cv2.absdiff(
-                cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY),
-                cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY))
-            motion = (diff > 20).sum()
-            motion_ratio = motion / diff.size
-
-            if motion_ratio < 0.005:  # 畫面幾乎沒動
-                self._dead_stuck_count = getattr(self, '_dead_stuck_count', 0) + 1
-                self.log(f"[警告] HP=0 + 畫面靜止 ({self._dead_stuck_count}/3)")
-                if self._dead_stuck_count >= 3:
-                    self.log("HP=0 且畫面無移動超過 3 次確認，關閉遊戲")
-                    alert('death')
-                    self.running = False
-                    self._status("已關閉遊戲", '#e74c3c')
-                    try:
-                        import subprocess
-                        subprocess.run(['taskkill', '/F', '/PID', str(
-                            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(ctypes.c_ulong(0))) or 0
-                        )], capture_output=True)
-                    except:
-                        pass
-                    # 用 PID 方式關閉
-                    try:
-                        pid = ctypes.c_ulong(0)
-                        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                        if pid.value:
-                            import subprocess
-                            subprocess.run(['taskkill', '/F', '/PID', str(pid.value)], capture_output=True)
-                            self.log(f"已終止進程 PID={pid.value}")
-                    except:
-                        pass
-                    return True
-            else:
-                self._dead_stuck_count = 0
-        except:
-            pass
-        return False
-
-    def _check_max_hours(self):
-        """最大運行時數檢查"""
-        max_h = self.var_max_hours.get()
-        if max_h <= 0 or not self.t0:
-            return False
-        elapsed = (time.time() - self.t0) / 3600
-        if elapsed >= max_h:
-            self.log(f"已運行 {elapsed:.1f} 小時，達到上限 {max_h} 小時，自動停止")
-            self.running = False
-            self._status(f"時間到（{max_h}h）", '#f5a623')
-            return True
-        return False
 
     def _loop(self):
         timers = {'hp': 0, 'mp': 0, 'heal': 0, 'buff': 0, 'summon': 0}
@@ -2515,18 +1904,23 @@ class BotApp:
         ctypes.windll.user32.SetForegroundWindow(hwnd_start)
         time.sleep(0.2)
 
-        # 1. 立刻喝綠水（用滑鼠點快捷欄，鍵盤被遊戲擋）
+        # 1. 立刻喝綠水
         if self.var_buff_en.get():
-            key = self.var_buff_key.get()
-            self._click_hotbar(cx_s, cy_s, cw_s, ch_s, key, clicks=5)
+            key = self.var_buff_key.get().lower()
+            keyboard.press(key)
+            time.sleep(0.05)
+            keyboard.release(key)
             timers['buff'] = time.time()
             self.buffs += 1
             self.log(f"啟動喝綠水({key})")
             time.sleep(0.5)
 
-        # 2. 小地圖需要手動開啟（Ctrl+M 鍵盤被遊戲擋）
-        self.log("提示：請手動開啟小地圖 (Ctrl+M) 以啟用定點功能")
-        time.sleep(0.3)
+        # 2. 打開小地圖 (Ctrl+M)
+        keyboard.press('ctrl')
+        time.sleep(0.05)
+        press_key_raw('m')
+        keyboard.release('ctrl')
+        time.sleep(0.5)
 
         # 3. 記錄小地圖上角色初始位置
         self.minimap_anchor = self._get_minimap_pos(cx_s, cy_s, cw_s, ch_s)
@@ -2556,7 +1950,6 @@ class BotApp:
             dcc = 0
             hwnd = g[0]
             cx, cy, cw, ch = get_rect(hwnd)
-            self._cur_rect = (cx, cy, cw, ch)
 
             sh_scene = int(ch * 0.75)
 
@@ -2603,45 +1996,9 @@ class BotApp:
             mode = self.var_mode.get()
             self._status(f"掃描({mode})", '#f5a623')
 
-            # 掃描：優先用畫面差異偵測（快），失敗再用螺旋掃描
+            # 掃描+攻擊一體化（碰到怪物瞬間就打）
             self._set_state(BotState.SCANNING)
-            mon = None
-
-            if self.var_fast_detect.get():
-                candidates = self._frame_diff_detect(cx, cy, cw, ch)
-                if candidates:
-                    # 驗證候選：移游標過去看是不是怪物
-                    for cand_x, cand_y in candidates:
-                        move_exact(cand_x, cand_y)
-                        time.sleep(0.05)
-                        if get_cursor() != CURSOR_FINGER:
-                            # 確認不是玩家（粉紅名字）
-                            try:
-                                name_area = grab_region(cand_x - 40, cand_y - 25, 80, 20)
-                                if name_area is not None:
-                                    r_ch = name_area[:,:,2].astype(int)
-                                    g_ch = name_area[:,:,1].astype(int)
-                                    pink = (r_ch > 150) & (g_ch < 120)
-                                    if pink.sum() > 15:
-                                        continue  # 玩家，跳過
-                            except:
-                                pass
-                            # 找到怪物！攻擊
-                            self.log(f"差異偵測→打！({cand_x},{cand_y})")
-                            game_down()
-                            time.sleep(0.08)
-                            drag_y = min(cy + int(ch*0.75) - 20, cand_y + random.randint(150, 300))
-                            for s in range(1, 6):
-                                move_exact(cand_x + random.randint(-10,10),
-                                           cand_y + (drag_y - cand_y) * s // 5)
-                                time.sleep(0.02)
-                            game_up()
-                            mon = (cand_x, cand_y)
-                            break
-
-            # Fallback：螺旋掃描
-            if not mon:
-                mon = scan_and_attack(cx, cy, cw, ch, hwnd, self.log, mode=mode)
+            mon = scan_and_attack(cx, cy, cw, ch, hwnd, self.log, mode=mode)
 
             if mon and self.running:
                 mx, my = mon
@@ -2654,9 +2011,9 @@ class BotApp:
                     # 定點：先按攻擊鍵 → 再點擊怪物+短拖曳
                     self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
                 elif mode == '遠程':
-                    self._click_hotbar(cx, cy, cw, ch, self.var_rng_key.get(), clicks=4)
+                    press_key(self.var_rng_key.get())
                 elif mode == '召喚':
-                    self._click_hotbar(cx, cy, cw, ch, self.var_sum_atk.get(), clicks=4)
+                    press_key(self.var_sum_atk.get())
 
                 time.sleep(0.2)
 
@@ -2715,7 +2072,7 @@ class BotApp:
                         retry_attack += 1
                         self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
 
-                    time.sleep(self._humanize_delay(0.17))
+                    time.sleep(0.15 + random.uniform(0, 0.05))
 
                 # 停止預掃描，取得結果
                 pre_scanner.stop()
@@ -2778,26 +2135,6 @@ class BotApp:
                             no_monster_count = 0
                 elif self.running:
                     time.sleep(1 + random.uniform(0, 0.5))
-
-            # ── 附加檢查（不影響打怪主迴圈）──
-            if self.running:
-                self._check_dead_stuck(cx, cy, cw, ch, hwnd)
-                self._check_max_hours()
-                self._check_captcha(cx, cy, cw, ch)
-                self._check_human_pause(timers)
-                self._check_geofence(cx, cy, cw, ch, hwnd)
-                if self._check_pk(cx, cy, cw, ch):
-                    act = self.var_pk_act.get()
-                    self.log(f"偵測到玩家！動作: {act}")
-                    alert('pk')
-                    if act == '回城':
-                        self._click_hotbar(cx, cy, cw, ch, self.var_recall_key.get(), clicks=2)
-                        time.sleep(self._humanize_delay(5))
-                    elif act == '逃跑':
-                        roam(cx, cy, cw, ch, hwnd, 400)
-                if self.running:
-                    self._check_supply(hwnd, cx, cy, cw, ch)
-
           except Exception as e:
             self.log(f"[錯誤] {e} — 自動恢復")
             time.sleep(1)
