@@ -1884,11 +1884,15 @@ class BotApp:
         """生存系統：HP/MP/治療/喝水/Buff — 每次循環都呼叫"""
         now = time.time()
         hp = mp = 1.0
+        pixel_ok = False
         if self.var_ocr_en.get():
             try:
                 hp = bars.hp(None, cx, cy, cw, ch)
-                self._bar(self.hp_cv, self.hp_tl, hp)
                 mp = bars.mp(None, cx, cy, cw, ch)
+                # 校準成功且有合理值才算 pixel_ok
+                if bars._calibrated and bars._hp_bar is not None and hp < 1.0:
+                    pixel_ok = True
+                self._bar(self.hp_cv, self.hp_tl, hp)
                 if mp >= 0:
                     self._bar(self.mp_cv, self.mp_tl, mp)
             except:
@@ -1897,7 +1901,8 @@ class BotApp:
         if not hasattr(self, '_last_hp_debug'):
             self._last_hp_debug = 0
         if now - self._last_hp_debug > 10:
-            self.log(f"[HP={hp*100:.0f}% MP={mp*100:.0f}% | {getattr(bars,'_last_ocr_text','')}]")
+            mode_str = "像素" if pixel_ok else "定時"
+            self.log(f"[HP={hp*100:.0f}% MP={mp*100:.0f}% 模式={mode_str} | {getattr(bars,'_last_ocr_text','')}]")
             self._last_hp_debug = now
 
         # Buff（不需要 HP 值，定時觸發）
@@ -1909,8 +1914,8 @@ class BotApp:
             self.buffs += 1
             self.log(f"喝綠水({k})")
 
-        # 死亡（僅在 HP 成功讀取時判定）
-        if hp >= 0 and hp <= 0.01:
+        # 死亡（僅在像素偵測正常時判定，避免誤判）
+        if pixel_ok and hp <= 0.01:
             self._handle_death(hwnd, cx, cy, cw, ch, timers)
             return hp, mp
 
@@ -1929,8 +1934,8 @@ class BotApp:
         mp_thr = self.var_mp_thr.get() / 100
         heal_thr = self.var_heal_thr.get() / 100
 
-        heal_trigger = (self.var_ocr_en.get() and hp < heal_thr) \
-                       or (not self.var_ocr_en.get() and now - timers['heal'] > self.var_heal_sec.get())
+        heal_trigger = (pixel_ok and hp < heal_thr) \
+                       or (not pixel_ok and now - timers['heal'] > self.var_heal_sec.get())
         if self.var_heal_en.get() and heal_trigger and now - timers['heal'] > 3:
             k = self.var_heal_key.get()
             for _ in range(self.var_heal_n.get()):
@@ -1940,8 +1945,8 @@ class BotApp:
             self.heals += 1
             self.log(f"治癒術({k}) HP={hp*100:.0f}%")
 
-        # 紅水 — 用像素偵測的 HP 比例判斷
-        if self.var_ocr_en.get():
+        # 紅水 — 像素偵測有效用比例，無效用定時
+        if pixel_ok:
             need_hp = hp < hp_thr
         else:
             need_hp = now - timers['hp'] > self.var_hp_sec.get()
@@ -1950,10 +1955,13 @@ class BotApp:
             self._click_hotbar(cx, cy, cw, ch, k)
             timers['hp'] = now
             self.pots += 1
-            self.log(f"喝紅水({k}) HP={hp*100:.0f}%")
+            if pixel_ok:
+                self.log(f"喝紅水({k}) HP={hp*100:.0f}%")
+            else:
+                self.log(f"喝紅水({k}) 定時")
 
         # 藍水
-        if self.var_ocr_en.get():
+        if pixel_ok:
             need_mp = mp < mp_thr
         else:
             need_mp = now - timers['mp'] > self.var_mp_sec.get()
@@ -1962,7 +1970,10 @@ class BotApp:
             self._click_hotbar(cx, cy, cw, ch, k)
             timers['mp'] = now
             self.mpots += 1
-            self.log(f"喝藍水({k}) MP={mp*100:.0f}%")
+            if pixel_ok:
+                self.log(f"喝藍水({k}) MP={mp*100:.0f}%")
+            else:
+                self.log(f"喝藍水({k}) 定時")
 
         # Buff
         # 召喚重召喚
