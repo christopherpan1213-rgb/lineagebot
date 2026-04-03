@@ -207,4 +207,66 @@ if not errors and not warnings:
     print("  全部通過!")
 print("=" * 60)
 
+# ── 11. 發布前檢查 ──
+print("\n[11] 發布前檢查...")
+exe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'LineageBot.exe')
+ver_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'version.txt')
+dist_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dist', 'LineageBot.exe')
+
+if os.path.exists(exe_path):
+    print(f"  OK: LineageBot.exe 存在 ({os.path.getsize(exe_path)//1024//1024}MB)")
+else:
+    warn("LineageBot.exe 不在根目錄（start.bat 找不到）")
+
+if os.path.exists(ver_path):
+    with open(ver_path) as vf:
+        local_ver = vf.read().strip()
+    # 從 py 檔讀版本
+    for line in lines:
+        if line.strip().startswith('BOT_VERSION'):
+            py_ver = 'v' + line.split('=')[1].strip().strip('"\'')
+            break
+    if local_ver == py_ver:
+        print(f"  OK: version.txt ({local_ver}) 與程式版本一致")
+    else:
+        warn(f"version.txt ({local_ver}) 與程式版本 ({py_ver}) 不一致")
+else:
+    warn("version.txt 不存在（更新系統無法比對版本）")
+
+# ── 12. 主迴圈打怪流程完整性 ──
+print("\n[12] 主迴圈打怪流程檢查...")
+# scan_and_attack 必須在主迴圈中被呼叫
+if 'scan_and_attack(cx, cy, cw, ch, hwnd' in source:
+    print("  OK: scan_and_attack 在主迴圈中")
+else:
+    error("scan_and_attack 不在主迴圈中！打怪功能可能壞了")
+
+# scan_and_attack 前面不能有會 return 的新功能檢查
+loop_start = source.find('def _loop(self):')
+scan_pos = source.find('scan_and_attack(cx, cy, cw, ch, hwnd', loop_start)
+if loop_start > 0 and scan_pos > 0:
+    between = source[loop_start:scan_pos]
+    # 找 while True 之後、scan 之前的 return 數量
+    while_pos = between.find('while True:')
+    if while_pos > 0:
+        after_while = between[while_pos:]
+        returns_before_scan = after_while.count('return')
+        # 允許的 return: running 檢查(2個) + 斷線(1個) = 3個
+        if returns_before_scan > 4:
+            warn(f"scan_and_attack 前有 {returns_before_scan} 個 return，可能阻斷打怪流程")
+
+# ═══ 結果 ═══
+print("\n" + "=" * 60)
+if errors:
+    print(f"  發現 {len(errors)} 個 BUG:")
+    for e in errors:
+        print(f"    {e}")
+if warnings:
+    print(f"  發現 {len(warnings)} 個警告:")
+    for w in warnings:
+        print(f"    {w}")
+if not errors and not warnings:
+    print("  全部通過!")
+print("=" * 60)
+
 sys.exit(1 if errors else 0)
