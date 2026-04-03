@@ -2557,42 +2557,6 @@ class BotApp:
             if not self.running:
                 return
 
-            # ── 死亡卡住偵測（5分鐘後生效）──
-            if self._check_dead_stuck(cx, cy, cw, ch, hwnd):
-                return
-
-            # ── 最大運行時數 ──
-            if self._check_max_hours():
-                return
-
-            # ── 聖光揭露卷軸偵測 ──
-            if self._check_captcha(cx, cy, cw, ch):
-                return  # 已暫停，等使用者處理
-
-            # ── 擬人化停頓 ──
-            self._check_human_pause(timers)
-            if not self.running:
-                return
-
-            # ── 地理圍欄 ──
-            self._check_geofence(cx, cy, cw, ch, hwnd)
-
-            # ── 防 PK 偵測 ──
-            if self._check_pk(cx, cy, cw, ch):
-                act = self.var_pk_act.get()
-                self.log(f"偵測到玩家！動作: {act}")
-                alert('pk')
-                if act == '回城':
-                    self._click_hotbar(cx, cy, cw, ch, self.var_recall_key.get(), clicks=2)
-                    time.sleep(self._humanize_delay(5))
-                elif act == '逃跑':
-                    roam(cx, cy, cw, ch, hwnd, 400)
-                continue
-
-            # ── 回城補給檢查 ──
-            if self._check_supply(hwnd, cx, cy, cw, ch):
-                return
-
             # ── 路徑重播模式 ──
             if self.var_path_en.get() and path.pts:
                 self._status("路徑重播", '#f5a623')
@@ -2806,6 +2770,26 @@ class BotApp:
                             no_monster_count = 0
                 elif self.running:
                     time.sleep(1 + random.uniform(0, 0.5))
+
+            # ── 附加檢查（不影響打怪主迴圈）──
+            if self.running:
+                self._check_dead_stuck(cx, cy, cw, ch, hwnd)
+                self._check_max_hours()
+                self._check_captcha(cx, cy, cw, ch)
+                self._check_human_pause(timers)
+                self._check_geofence(cx, cy, cw, ch, hwnd)
+                if self._check_pk(cx, cy, cw, ch):
+                    act = self.var_pk_act.get()
+                    self.log(f"偵測到玩家！動作: {act}")
+                    alert('pk')
+                    if act == '回城':
+                        self._click_hotbar(cx, cy, cw, ch, self.var_recall_key.get(), clicks=2)
+                        time.sleep(self._humanize_delay(5))
+                    elif act == '逃跑':
+                        roam(cx, cy, cw, ch, hwnd, 400)
+                if self.running:
+                    self._check_supply(hwnd, cx, cy, cw, ch)
+
           except Exception as e:
             self.log(f"[錯誤] {e} — 自動恢復")
             time.sleep(1)
