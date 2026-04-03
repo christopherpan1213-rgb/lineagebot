@@ -600,12 +600,16 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
                 if log:
                     log(f"掃{count}點→打！({px},{py})")
 
-                # 按下+拖曳攻擊
-                time.sleep(0.05)  # 讓遊戲確認游標在怪物上
-                game_down()
-                time.sleep(0.08)  # 等遊戲註冊按下事件
+                # 定點/墮落之地模式：不在掃描中拖曳（避免誤觸移動）
+                # 只回傳座標，讓 _do_attack 用正確方式攻擊
+                if mode in ('定點', '純定點', '墮落之地'):
+                    return (px, py)
 
-                # 所有模式統一拖曳距離（150-300px），天堂需要拖夠遠才觸發攻擊
+                # 近戰/遠程：按下+拖曳攻擊
+                time.sleep(0.05)
+                game_down()
+                time.sleep(0.08)
+
                 drag_dist = random.randint(150, 300)
                 drag_x = px + random.randint(-15, 15)
                 drag_y = min(cy + sh - 20, py + drag_dist)
