@@ -600,12 +600,7 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
                 if log:
                     log(f"掃{count}點→打！({px},{py})")
 
-                # 定點/墮落之地模式：不在掃描中拖曳（避免誤觸移動）
-                # 只回傳座標，讓 _do_attack 用正確方式攻擊
-                if mode in ('定點', '純定點', '墮落之地'):
-                    return (px, py)
-
-                # 近戰/遠程：按下+拖曳攻擊
+                # 按下+拖曳攻擊
                 time.sleep(0.05)
                 game_down()
                 time.sleep(0.08)
@@ -2066,19 +2061,15 @@ class BotApp:
                 attack(mx, my, cx, cy, cw, ch)
 
     def _combat_skill(self):
-        """戰鬥中持續施放技能（依模式，全部用滑鼠點快捷欄）"""
-        rect = getattr(self, '_cur_rect', None)
-        if not rect: return
-        cx, cy, cw, ch = rect
+        """戰鬥中持續施放技能
+        注意：定點/墮落之地不在這裡按攻擊鍵（會搶滑鼠干擾戰鬥偵測）
+        這些模式的攻擊鍵在 _do_attack 和 retry_attack 裡處理
+        """
         mode = self.var_mode.get()
         if mode == '近戰':
             skills.use_next()
-        elif mode in ('遠程', '定點', '純定點', '墮落之地'):
-            self._click_hotbar(cx, cy, cw, ch, self.var_rng_key.get(), clicks=4)
-        elif mode == '召喚':
-            self._click_hotbar(cx, cy, cw, ch, self.var_sum_atk.get(), clicks=4)
-        elif mode == '隊伍' and self.var_pt_role.get() == '補師':
-            self._click_hotbar(cx, cy, cw, ch, self.var_pt_heal.get(), clicks=4)
+        # 定點/純定點/墮落之地：不做任何事（靠 retry_attack 重新攻擊）
+        # 遠程/召喚/隊伍：也靠 retry_attack 處理
 
     # ═══ 新功能：死亡復活 / 防PK / 畫面差異偵測 / 回城補給 ═══
 
