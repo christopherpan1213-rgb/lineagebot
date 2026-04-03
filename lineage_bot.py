@@ -2,7 +2,7 @@
 天堂經典版 Bot — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "15.1"
+BOT_VERSION = "15.2"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -538,25 +538,26 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
     if mode == '墮落之地':
         center_y = cy + int(sh * 0.35)  # 重心往上移
 
-    # 步距依視窗大小縮放（以 860px 寬為基準）
-    scale = min(cw, sh) / 860
+    # 步距依視窗大小縮放（以 860px 為基準）
+    short_side = min(cw, sh)
+    scale = short_side / 860
 
     if mode == '純定點':
-        step = max(30, int(75 * scale))
-        max_radius = min(cw, sh) * 2 // 3
-        scan_delay = 0.02   # 20ms — 慢速穩定掃描
+        step = max(15, int(75 * scale))
+        max_radius = short_side * 2 // 3
+        scan_delay = 0.02
     elif mode == '墮落之地':
-        step = max(30, int(75 * scale))
-        max_radius = min(cw, sh) * 3 // 4  # 更大範圍
-        scan_delay = 0.012  # 12ms
-    elif mode in ('遠程', '定點', '純定點', '墮落之地'):
-        step = max(30, int(75 * scale))
-        max_radius = min(cw, sh) * 2 // 3
-        scan_delay = 0.01   # 10ms
-    else:
-        step = max(25, int(65 * scale))
-        max_radius = min(cw, sh) // 3
-        scan_delay = 0.015  # 15ms
+        step = max(15, int(75 * scale))
+        max_radius = short_side * 3 // 4
+        scan_delay = 0.012
+    elif mode in ('遠程', '定點'):
+        step = max(15, int(75 * scale))
+        max_radius = short_side * 2 // 3
+        scan_delay = 0.01
+    else:  # 近戰
+        step = max(15, int(65 * scale))
+        max_radius = short_side // 2
+        scan_delay = 0.015
 
     start_angle = random.uniform(0, 2 * math.pi)
     count = 0
