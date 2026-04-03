@@ -870,11 +870,11 @@ class BotApp:
         self.var_fallen_walk_min=tk.IntVar(value=5)    # 每幾分鐘
         self.var_fallen_walk_sec=tk.IntVar(value=10)   # 點幾秒
         self.var_hp_en=tk.BooleanVar(value=True)
-        self.var_hp_sec=tk.IntVar(value=8)       # 定時喝紅水秒數
+        self.var_hp_sec=tk.IntVar(value=60)      # 定時喝紅水秒數
         self.var_mp_en=tk.BooleanVar(value=False)
-        self.var_mp_sec=tk.IntVar(value=10)      # 定時喝藍水秒數
+        self.var_mp_sec=tk.IntVar(value=60)      # 定時喝藍水秒數
         self.var_heal_en=tk.BooleanVar(value=True)
-        self.var_heal_sec=tk.IntVar(value=15)    # 定時治癒術秒數
+        self.var_heal_sec=tk.IntVar(value=60)    # 定時治癒術秒數
         self.var_buff_en=tk.BooleanVar(value=True)
         self.var_recall_en=tk.BooleanVar(value=False)
         self.var_antipk=tk.BooleanVar(value=False)
