@@ -985,15 +985,15 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰',
 
                 if mode in ('近戰', '地監'):
                     # 近戰/地監：按住怪物名字不放，角色自動走過去打
-                    smooth_move(px, py)
-                    human_sleep(0.08)
+                    move_exact(px, py)
+                    time.sleep(0.08)
                     game_down()
                 else:
                     # 遠程/定點/其他：按住+拖曳觸發遠程自動攻擊
-                    smooth_move(px, py)
-                    human_sleep(0.08)
+                    move_exact(px, py)
+                    time.sleep(0.08)
                     game_down()
-                    human_sleep(0.15)
+                    time.sleep(0.15)
 
                     drag_dist = random.randint(150, 250)
                     drag_dx = random.randint(-15, 15)
@@ -1069,19 +1069,19 @@ pre_scanner = PreScanner()
 
 def attack_melee(mx, my):
     """近戰攻擊：移到怪物名字按住不放"""
-    smooth_move(mx, my)
-    human_sleep(0.1)
+    move_exact(mx, my)
+    time.sleep(0.1)
     game_down()
 
 def attack_drag(mx, my, cx, cy, cw, ch):
     """遠程拖曳攻擊：移到怪物→按住→拖曳→放開
     用 move_relative 做真實拖曳，遊戲用 Raw Input 才能偵測到
     """
-    smooth_move(mx, my)
-    human_sleep(0.1)
+    move_exact(mx, my)
+    time.sleep(0.1)
 
     game_down()
-    human_sleep(0.15)
+    time.sleep(0.15)
 
     drag_dist = random.randint(150, 250)
     drag_dx = random.randint(-15, 15)
@@ -2616,16 +2616,16 @@ class BotApp:
             dd = max(1, math.sqrt(dx * dx + dy * dy))
             sx = max(cx + 50, min(cx + cw - 50, mx + int(dx / dd * d)))
             sy = max(cy + 30, min(cy + sh - 30, my + int(dy / dd * d)))
-            smooth_move(sx, sy)
+            move_exact(sx, sy)
             game_click(sx, sy)
         elif mode in ('定點', '純定點', '墮落之地'):
             # 定點：按攻擊鍵 → 移到怪物 → 按住 → 拖曳 → 放開
             press_key(self.var_rng_key.get())
             time.sleep(0.1)
-            smooth_move(mx, my)
-            human_sleep(0.08)
+            move_exact(mx, my)
+            time.sleep(0.08)
             game_down()
-            human_sleep(0.15)
+            time.sleep(0.15)
             drag_dist = random.randint(150, 250)
             drag_dx = random.randint(-15, 15)
             steps = 12
@@ -3078,7 +3078,7 @@ class BotApp:
                             self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
                             no_monster_count = 0
                 elif self.running:
-                    human_sleep(1.0)
+                    time.sleep(1 + random.uniform(0, 0.5))
           except Exception as e:
             import traceback
             self.log(f"[錯誤] {e} — 自動恢復")
