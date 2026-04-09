@@ -259,13 +259,14 @@ def get_rect(h):
 # ═══════════════════════════════ HP/MP ═══════════════════════════════
 
 class BarReader:
-    """HP/MP 條讀取 — 用 Windows OCR 直接讀 HP: 123/123 數字
-    每 3 秒 OCR 一次（避免太頻繁），中間用快取值
+    """HP/MP 條讀取 — 像素偵測 + OCR 雙軌
     """
     def __init__(self):
         self.ok = True
-        self._hp_ratio = 1.0
-        self._mp_ratio = 1.0
+        self._hp_ratio = -1.0   # -1 = 從未成功讀取
+        self._mp_ratio = -1.0
+        self._hp_ever_read = False  # 是否曾經成功讀過 HP
+        self._mp_ever_read = False
         self._hp_cur = 0    # 目前 HP
         self._hp_max = 0    # 最大 HP
         self._mp_cur = 0    # 目前 MP
@@ -558,7 +559,7 @@ class BarReader:
         # 1. 嘗試載入校準檔
         if not hasattr(self, '_pixel_hp_bar'):
             self._load_pixel_config()
-        # 2. 沒校準檔就自動搜尋
+        # 2. 沒校準檔就自動搜尋（每次都重試直到找到）
         if not self._pixel_hp_bar:
             self._auto_find_bars(cx, cy, cw, ch)
         # 3. 像素偵測
@@ -566,10 +567,18 @@ class BarReader:
             val = self._read_pixel_bar(cx, cy, cw, ch, self._pixel_hp_bar, 'hp')
             if val is not None:
                 self._hp_ratio = val
+                self._hp_ever_read = True
                 return val
+            else:
+                # 像素偵測失敗，重置讓下次重新搜尋
+                self._pixel_hp_bar = None
+                self._auto_found = False
         # 4. Fallback: OCR
         self._update(cx, cy, cw, ch)
-        return self._hp_ratio
+        if self._hp_ever_read:
+            return self._hp_ratio
+        # 從未成功讀取過 → 回傳 -1 讓生存系統用定時模式
+        return -1.0
 
     def mp(self, sct, cx, cy, cw, ch):
         if not hasattr(self, '_pixel_mp_bar'):
@@ -580,8 +589,11 @@ class BarReader:
             val = self._read_pixel_bar(cx, cy, cw, ch, self._pixel_mp_bar, 'mp')
             if val is not None:
                 self._mp_ratio = val
+                self._mp_ever_read = True
                 return val
-        return self._mp_ratio
+        if self._mp_ever_read:
+            return self._mp_ratio
+        return -1.0
 
     def calibrate(self, sct, cx, cy, cw, ch):
         self._load_pixel_config()
@@ -2365,28 +2377,37 @@ class BotApp:
     def _check_survival(self, hwnd, cx, cy, cw, ch, timers):
         """生存系統：HP/MP/治療/喝水/Buff — 每次循環都呼叫"""
         now = time.time()
-        hp = mp = 1.0
+        hp = mp = -1.0
+        hp_unknown = True  # HP 是否未知（無法讀取）
+
         if self.var_ocr_en.get():
             try:
                 prev_hp = getattr(self, '_prev_hp', 1.0)
                 hp = bars.hp(None, cx, cy, cw, ch)
-                self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max, bar_type='hp')
+                if hp >= 0:
+                    hp_unknown = False
+                    self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max, bar_type='hp')
+                else:
+                    # HP 讀不到，顯示「?」
+                    self.hp_tl.config(text="無法讀取")
                 mp = bars.mp(None, cx, cy, cw, ch)
                 if mp >= 0:
                     self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max, bar_type='mp')
 
-                # HP 急降即時反應：掉超過 20% 立即喝紅水
-                if hp >= 0 and prev_hp - hp > 0.20 and self.var_hp_en.get():
+                # HP 急降即時反應
+                if hp >= 0 and prev_hp >= 0 and prev_hp - hp > 0.20 and self.var_hp_en.get():
                     self.log(f"HP急降！{prev_hp*100:.0f}%→{hp*100:.0f}%")
                     k = self.var_hp_key.get()
                     self._click_hotbar(cx, cy, cw, ch, k)
                     timers['hp'] = now
                     self.pots += 1
-                self._prev_hp = hp
+                if hp >= 0:
+                    self._prev_hp = hp
             except:
                 pass
-        else:
-            # OCR 關閉，強制設為 0（觸發定時喝水）
+
+        # HP 未知或 OCR 關閉 → 強制定時喝水模式
+        if hp_unknown or not self.var_ocr_en.get():
             bars._hp_max = 0
             bars._mp_max = 0
         # debug：每 10 秒顯示 HP/MP 讀值，方便排查
@@ -2436,30 +2457,27 @@ class BotApp:
             self.heals += 1
             self.log(f"治癒術({k}) HP={hp*100:.0f}%")
 
-        # 紅水 — OCR 有讀到就用數值判斷，讀不到就定時喝
-        hp_cur = bars._hp_cur
-        hp_max = bars._hp_max
+        # 紅水 — HP 已知用比例判斷，HP 未知用定時喝
         hp_thr = self.var_hp_thr.get() / 100
-        if hp_max > 0:
-            need_hp = hp_cur < hp_max * hp_thr and hp_cur > 0
+        if hp >= 0 and not hp_unknown:
+            need_hp = hp < hp_thr
         else:
+            # HP 無法讀取 → 定時喝水保底
             need_hp = now - timers['hp'] > self.var_hp_sec.get()
         if self.var_hp_en.get() and need_hp and now - timers['hp'] > 4:
             k = self.var_hp_key.get()
             self._click_hotbar(cx, cy, cw, ch, k)
             timers['hp'] = now
             self.pots += 1
-            if hp_max > 0:
-                self.log(f"喝紅水({k}) HP={hp_cur}/{hp_max}")
+            if hp >= 0:
+                self.log(f"喝紅水({k}) HP={hp*100:.0f}%")
             else:
                 self.log(f"喝紅水({k}) 定時保底")
 
         # 藍水
-        mp_cur = bars._mp_cur
-        mp_max = bars._mp_max
         mp_thr = self.var_mp_thr.get() / 100
-        if mp_max > 0:
-            need_mp = mp_cur < mp_max * mp_thr and mp_cur > 0
+        if mp >= 0:
+            need_mp = mp < mp_thr
         else:
             need_mp = now - timers['mp'] > self.var_mp_sec.get()
         if self.var_mp_en.get() and need_mp and now - timers['mp'] > 4:
@@ -2467,10 +2485,13 @@ class BotApp:
             self._click_hotbar(cx, cy, cw, ch, k)
             timers['mp'] = now
             self.mpots += 1
-            self.log(f"喝藍水({k}) MP={mp_cur}/{mp_max}")
+            if mp >= 0:
+                self.log(f"喝藍水({k}) MP={mp*100:.0f}%")
+            else:
+                self.log(f"喝藍水({k}) 定時保底")
 
         # 多組喝水（按優先級：閾值高的先觸發）
-        if hp >= 0:
+        if hp >= 0 and not hp_unknown:
             for i in range(3):
                 if not self.var_pot_en[i].get():
                     continue
