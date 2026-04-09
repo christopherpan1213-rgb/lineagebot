@@ -2349,19 +2349,27 @@ class BotApp:
 
         x, y = pos
         # 確保滑鼠完全放開（攻擊拖曳可能還在）
-        try:
-            game_up()
-        except:
-            pass
+        if HAS_INTERCEPTION:
+            try: interception.mouse_up('left')
+            except: pass
+        else:
+            try: mouse_lib.release('left')
+            except: pass
         time.sleep(0.2)
         # 移到快捷欄
         move_exact(x, y)
         time.sleep(0.25)
-        # 連點（用 game_click 有 fallback）
+        # 連點（直接用 interception 或 mouse_lib）
         for i in range(clicks):
-            game_down()
-            time.sleep(0.04)
-            game_up()
+            if HAS_INTERCEPTION:
+                try:
+                    interception.mouse_down('left')
+                    time.sleep(0.04)
+                    interception.mouse_up('left')
+                except:
+                    mouse_lib.click('left')
+            else:
+                mouse_lib.click('left')
             if i < clicks - 1:
                 time.sleep(0.12)
         time.sleep(0.15)
@@ -2542,7 +2550,7 @@ class BotApp:
         mode = self.var_mode.get()
         if mode == '召喚' and now - timers['summon'] > self.var_sum_sec.get():
             ctypes.windll.user32.SetForegroundWindow(hwnd)
-            self._click_hotbar(cx, cy, cw, ch, self.var_sum_key.get(), clicks=4)
+            press_key(self.var_sum_key.get())
             timers['summon'] = now
             self.log("重召喚")
 
@@ -2562,7 +2570,7 @@ class BotApp:
                 time.sleep(0.1)
                 cnt = self.var_timer_cnt[i].get()
                 for _ in range(cnt):
-                    self._click_hotbar(cx, cy, cw, ch, tkey, clicks=2)
+                    press_key(tkey)
                     time.sleep(0.15)
                 timers[timer_name] = now
                 self.log(f"定時按鍵#{i+1}: {tkey} x{cnt}")
@@ -2575,9 +2583,9 @@ class BotApp:
                 # 找受傷的寵物（兩行白字+紅色血條=受傷中）
                 pet_pos = _find_pet(cx, cy, cw, ch)
                 if pet_pos:
-                    # 有血條就代表受傷，點治癒鍵 → 點擊寵物補血
+                    # 有血條就代表受傷，按治癒鍵 → 點擊寵物
                     ctypes.windll.user32.SetForegroundWindow(hwnd)
-                    self._click_hotbar(cx, cy, cw, ch, self.var_pet_heal_key.get(), clicks=4)
+                    press_key(self.var_pet_heal_key.get())
                     time.sleep(0.2)
                     game_click(pet_pos[0], pet_pos[1])
                     time.sleep(0.3)
@@ -2600,7 +2608,7 @@ class BotApp:
         elif mode == '遠程':
             attack_drag(mx, my, cx, cy, cw, ch)
             time.sleep(0.2)
-            self._click_hotbar(cx, cy, cw, ch, self.var_rng_key.get(), clicks=2)
+            press_key(self.var_rng_key.get())
             # 後退保持距離
             sh = int(ch * 0.75)
             d = self.var_rng_dist.get()
@@ -2611,8 +2619,8 @@ class BotApp:
             smooth_move(sx, sy)
             game_click(sx, sy)
         elif mode in ('定點', '純定點', '墮落之地'):
-            # 定點：點攻擊鍵 → 移到怪物 → 按住 → 拖曳 → 放開
-            self._click_hotbar(cx, cy, cw, ch, self.var_rng_key.get(), clicks=2)
+            # 定點：按攻擊鍵 → 移到怪物 → 按住 → 拖曳 → 放開
+            press_key(self.var_rng_key.get())
             time.sleep(0.1)
             smooth_move(mx, my)
             human_sleep(0.08)
@@ -2638,7 +2646,7 @@ class BotApp:
             game_up()
         elif mode == '召喚':
             attack_drag(mx, my, cx, cy, cw, ch)
-            self._click_hotbar(cx, cy, cw, ch, self.var_sum_atk.get(), clicks=2)
+            press_key(self.var_sum_atk.get())
             sh = int(ch * 0.75)
             move_exact(cx + cw // 2, cy + sh // 2)
             game_click()
@@ -2647,31 +2655,22 @@ class BotApp:
             if role in ('坦克', '輸出'):
                 attack_melee(mx, my)
             elif role == '補師':
-                self._click_hotbar(cx, cy, cw, ch, self.var_pt_heal.get(), clicks=4)
+                press_key(self.var_pt_heal.get())
             elif role == '輔助':
-                self._click_hotbar(cx, cy, cw, ch, self.var_pt_buff.get(), clicks=4)
+                press_key(self.var_pt_buff.get())
                 attack_melee(mx, my)
 
     def _combat_skill(self, cx=0, cy=0, cw=0, ch=0):
-        """戰鬥中持續施放技能（依模式，用滑鼠點快捷欄）"""
+        """戰鬥中持續施放技能（用鍵盤，不動滑鼠避免干擾戰鬥）"""
         mode = self.var_mode.get()
         if mode in ('近戰', '地監'):
             skills.use_next()
         elif mode in ('遠程', '定點', '純定點', '墮落之地'):
-            if cw > 0:
-                self._click_hotbar(cx, cy, cw, ch, self.var_rng_key.get(), clicks=2)
-            else:
-                press_key(self.var_rng_key.get())
+            press_key(self.var_rng_key.get())
         elif mode == '召喚':
-            if cw > 0:
-                self._click_hotbar(cx, cy, cw, ch, self.var_sum_atk.get(), clicks=2)
-            else:
-                press_key(self.var_sum_atk.get())
+            press_key(self.var_sum_atk.get())
         elif mode == '隊伍' and self.var_pt_role.get() == '補師':
-            if cw > 0:
-                self._click_hotbar(cx, cy, cw, ch, self.var_pt_heal.get(), clicks=4)
-            else:
-                press_key(self.var_pt_heal.get())
+            press_key(self.var_pt_heal.get())
 
     def _loop(self):
         timers = {'hp': 0, 'mp': 0, 'heal': 0, 'buff': 0, 'summon': 0}
@@ -2886,9 +2885,9 @@ class BotApp:
                     # 定點：先按攻擊鍵 → 再點擊怪物+短拖曳
                     self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
                 elif mode == '遠程':
-                    self._click_hotbar(cx, cy, cw, ch, self.var_rng_key.get(), clicks=2)
+                    press_key(self.var_rng_key.get())
                 elif mode == '召喚':
-                    self._click_hotbar(cx, cy, cw, ch, self.var_sum_atk.get(), clicks=2)
+                    press_key(self.var_sum_atk.get())
 
                 time.sleep(0.2)
 
