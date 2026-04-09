@@ -975,8 +975,8 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰',
                 if log:
                     log(f"掃{count}點→打！({px},{py})")
 
-                if mode in ('近戰', '地監'):
-                    # 近戰/地監：按住怪物名字不放，角色自動走過去打
+                if mode == '地監':
+                    # 地監：按住怪物名字不放，角色自動走過去打
                     move_exact(px, py)
                     time.sleep(0.08)
                     game_down()
@@ -1059,11 +1059,9 @@ class PreScanner:
 
 pre_scanner = PreScanner()
 
-def attack_melee(mx, my):
-    """近戰攻擊：移到怪物名字按住不放"""
-    move_exact(mx, my)
-    time.sleep(0.1)
-    game_down()
+def attack_melee(mx, my, cx=0, cy=0, cw=0, ch=0):
+    """近戰攻擊：移到怪物→按住→拖曳（跟遠程一樣）"""
+    attack_drag(mx, my, cx, cy, cw, ch)
 
 def attack_drag(mx, my, cx, cy, cw, ch):
     """遠程拖曳攻擊：移到怪物→按住→拖曳→放開
@@ -2690,7 +2688,7 @@ class BotApp:
         time.sleep(0.1)
         mode = self.var_mode.get()
         if mode in ('近戰', '地監'):
-            attack_melee(mx, my)
+            attack_melee(mx, my, cx, cy, cw, ch)
         elif mode == '遠程':
             attack_drag(mx, my, cx, cy, cw, ch)
             time.sleep(0.2)
@@ -2739,12 +2737,12 @@ class BotApp:
         elif mode == '隊伍':
             role = self.var_pt_role.get()
             if role in ('坦克', '輸出'):
-                attack_melee(mx, my)
+                attack_melee(mx, my, cx, cy, cw, ch)
             elif role == '補師':
                 press_key(self.var_pt_heal.get())
             elif role == '輔助':
                 press_key(self.var_pt_buff.get())
-                attack_melee(mx, my)
+                attack_melee(mx, my, cx, cy, cw, ch)
 
     def _combat_skill(self, cx=0, cy=0, cw=0, ch=0):
         """戰鬥中持續施放技能（用鍵盤，不動滑鼠避免干擾戰鬥）"""
@@ -3002,14 +3000,13 @@ class BotApp:
                             return
                         last_surv = now
 
-                    # 技能施放（每 1 秒，近戰/地監不需要）
-                    if mode not in ('近戰', '地監') and now - last_skill > 1.0:
+                    # 技能施放（每 1 秒，地監按住不放不需要）
+                    if mode != '地監' and now - last_skill > 1.0:
                         self._combat_skill(cx, cy, cw, ch)
                         last_skill = now
 
-                    if mode in ('近戰', '地監'):
-                        # ── 近戰/地監：按住不放，偵測怪物死亡 ──
-                        # HP 條消失偵測
+                    if mode == '地監':
+                        # ── 地監：按住不放，偵測怪物死亡 ──
                         if not detect_monster_hp_bar(cx, cy, cw, ch, mx, my):
                             hp_bar_gone_count += 1
                             if hp_bar_gone_count >= 2:
@@ -3048,7 +3045,8 @@ class BotApp:
                         time.sleep(0.15 + random.uniform(0, 0.05))
 
                 # 近戰/地監：戰鬥結束放開滑鼠
-                if mode in ('近戰', '地監'):
+                # 地監模式：戰鬥結束放開滑鼠
+                if mode == '地監':
                     game_up()
 
                 # 停止預掃描，取得結果
