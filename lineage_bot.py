@@ -1353,6 +1353,8 @@ class BotApp:
         self.var_fallen_walk_en=tk.BooleanVar(value=True)
         self.var_fallen_walk_min=tk.IntVar(value=5)    # 每幾分鐘
         self.var_fallen_walk_sec=tk.IntVar(value=10)   # 點幾秒
+        self.var_max_hp=tk.IntVar(value=0)   # 最大HP（0=自動偵測）
+        self.var_max_mp=tk.IntVar(value=0)   # 最大MP（0=自動偵測）
         self.var_hp_en=tk.BooleanVar(value=True)
         self.var_hp_sec=tk.IntVar(value=60)      # 定時喝紅水秒數
         self.var_mp_en=tk.BooleanVar(value=False)
@@ -1665,6 +1667,15 @@ class BotApp:
     # ═══ 生存頁（ROBOBEAR 風格：緊湊一行式佈局） ═══
     def _build_survival(self):
         p=self.pages['生存']
+
+        # ── HP/MP 設定 ──
+        sf=self._section(p,"❤ HP/MP 設定（填入最大值可顯示絕對數字）");sf.pack(fill='x',padx=8,pady=2)
+        r=self._frame(sf);r.pack(fill='x',pady=1)
+        self._lbl(r,"最大HP:").pack(side='left')
+        self._spin(r,self.var_max_hp,0,99999,w=6,inc=10).pack(side='left')
+        self._lbl(r,"  最大MP:").pack(side='left')
+        self._spin(r,self.var_max_mp,0,99999,w=6,inc=10).pack(side='left')
+        self._lbl(r,"  (0=用像素比例)").pack(side='left')
 
         # ── 喝水保護 ──
         sf=self._section(p,"⚔ 喝水保護");sf.pack(fill='x',padx=8,pady=2)
@@ -2147,14 +2158,19 @@ class BotApp:
             self.log_w.see('end');self.log_w.config(state='disabled')
         self.root.after(0,_u)
 
-    def _bar(self,cv,tl,pct,w=120,cur=0,mx=0):
+    def _bar(self,cv,tl,pct,w=120,cur=0,mx=0,bar_type='hp'):
         def _u():
             p=max(0,min(1,pct));cv.delete('all')
             cv.create_rectangle(0,0,w,16,fill='#222',outline='')
             c=ACC if p<0.3 else('#f5a623' if p<0.6 else'#27ae60')
             cv.create_rectangle(0,0,int(w*p),16,fill=c,outline='')
-            if mx > 0:
-                tl.config(text=f"{cur}/{mx} ({p*100:.0f}%)")
+            # 用設定的最大值計算絕對數字
+            max_val = self.var_max_hp.get() if bar_type=='hp' else self.var_max_mp.get()
+            if max_val > 0:
+                abs_cur = int(p * max_val)
+                tl.config(text=f"{abs_cur}/{max_val}")
+            elif mx > 0:
+                tl.config(text=f"{cur}/{mx}")
             else:
                 tl.config(text=f"{p*100:.0f}%")
         self.root.after(0,_u)
@@ -2354,10 +2370,10 @@ class BotApp:
             try:
                 prev_hp = getattr(self, '_prev_hp', 1.0)
                 hp = bars.hp(None, cx, cy, cw, ch)
-                self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max)
+                self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max, bar_type='hp')
                 mp = bars.mp(None, cx, cy, cw, ch)
                 if mp >= 0:
-                    self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max)
+                    self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max, bar_type='mp')
 
                 # HP 急降即時反應：掉超過 20% 立即喝紅水
                 if hp >= 0 and prev_hp - hp > 0.20 and self.var_hp_en.get():
