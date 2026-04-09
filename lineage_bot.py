@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "14.0"
+BOT_VERSION = "15.0"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -55,6 +55,15 @@ except:
     from mss import mss
     HAS_DXCAM = False
 
+# OCR 引擎：EasyOCR（懶載入）
+_ocr_reader = None
+def get_ocr():
+    global _ocr_reader
+    if _ocr_reader is None:
+        import easyocr
+        _ocr_reader = easyocr.Reader(['ch_tra', 'en'], gpu=False, verbose=False)
+    return _ocr_reader
+
 # 輸入引擎：優先 Interception
 try:
     import interception; interception.auto_capture_devices(mouse=True, keyboard=True); HAS_INTERCEPTION = True
@@ -62,6 +71,8 @@ except: HAS_INTERCEPTION = False
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, 'bot_config.json')
+PROFILES_DIR = os.path.join(SCRIPT_DIR, 'profiles')
+os.makedirs(PROFILES_DIR, exist_ok=True)
 SS_DIR = os.path.join(SCRIPT_DIR, 'bot_screenshots')
 os.makedirs(SS_DIR, exist_ok=True)
 
@@ -388,20 +399,248 @@ class BarReader:
         self._ocr_busy = True
         threading.Thread(target=self._bg_ocr, args=(cx, cy, cw, ch), daemon=True).start()
 
+    def _load_pixel_config(self):
+        """讀取 hp_config.json（由 hp_monitor.py 校準工具產生）"""
+        try:
+            cfg_path = os.path.join(SCRIPT_DIR, 'hp_config.json')
+            with open(cfg_path) as f:
+                data = json.load(f)
+            self._pixel_hp_bar = tuple(data['hp_bar']) if 'hp_bar' in data else None
+            self._pixel_mp_bar = tuple(data['mp_bar']) if 'mp_bar' in data else None
+            return self._pixel_hp_bar is not None
+        except:
+            self._pixel_hp_bar = None
+            self._pixel_mp_bar = None
+            return False
+
+    def _read_pixel_bar(self, cx, cy, cw, ch, bar_info, bar_type='hp'):
+        """用 HSV 色域 + 多行掃描讀取 HP/MP 條比例
+        改進：7 行掃描取中位數、HSV 偵測更強健、深灰色偵測損失部分
+        """
+        if not bar_info:
+            return None
+        x1_pct, x2_pct, y_pct = bar_info
+        y = int(ch * y_pct)
+        scan_left = int(cw * 0.15)
+        x_start = max(0, int(cw * x1_pct) - scan_left)
+        x_end = min(cw, int(cw * x2_pct) + int(cw * 0.05))
+        region_w = x_end - x_start
+        if region_w < 5:
+            return None
+        try:
+            # 掃描 7 行（上下各 3 行），取中位數提高穩定性
+            frame = grab_region(cx + x_start, cy + y - 3, region_w, 7)
+            if frame is None or frame.size == 0:
+                return None
+
+            # 轉 HSV 色域（對光線變化更強健）
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            h, s, v = hsv[:,:,0].astype(int), hsv[:,:,1].astype(int), hsv[:,:,2].astype(int)
+
+            if bar_type == 'hp':
+                # HP 紅色：H=0-10 或 170-180, S>60, V>60
+                fill_mask = ((h < 10) | (h > 170)) & (s > 60) & (v > 60)
+            else:
+                # MP 藍色：H=100-130, S>50, V>50
+                fill_mask = (h > 100) & (h < 130) & (s > 50) & (v > 50)
+
+            # 深灰色 = HP 損失部分（天堂 HP 條損失的部分是深灰/黑色）
+            dark_mask = (v < 50) & (s < 40)
+
+            # 逐行計算比例，取中位數
+            ratios = []
+            for row in range(frame.shape[0]):
+                fill_cols = np.where(fill_mask[row])[0]
+                dark_cols = np.where(dark_mask[row])[0]
+                if len(fill_cols) == 0 and len(dark_cols) == 0:
+                    continue
+
+                if len(fill_cols) == 0:
+                    ratios.append(0.0)
+                    continue
+
+                # 找填充區域的範圍
+                first_fill = fill_cols[0]
+                last_fill = fill_cols[-1]
+                fill_width = last_fill - first_fill + 1
+
+                # 找損失區域：填充區左邊的深灰像素
+                left_dark = dark_cols[dark_cols < first_fill]
+                dark_width = len(left_dark)
+
+                total = fill_width + dark_width
+                if total < 3:
+                    continue
+                ratios.append(fill_width / total)
+
+            if not ratios:
+                return None
+
+            # 取中位數（排除異常值）
+            return float(np.median(ratios))
+        except:
+            return None
+
     def hp(self, sct, cx, cy, cw, ch):
+        # 優先用像素偵測（如果有校準檔）
+        if not hasattr(self, '_pixel_hp_bar'):
+            self._load_pixel_config()
+        if self._pixel_hp_bar:
+            val = self._read_pixel_bar(cx, cy, cw, ch, self._pixel_hp_bar, 'hp')
+            if val is not None:
+                self._hp_ratio = val
+                return val
+        # Fallback: OCR
         self._update(cx, cy, cw, ch)
         return self._hp_ratio
 
     def mp(self, sct, cx, cy, cw, ch):
+        if not hasattr(self, '_pixel_mp_bar'):
+            self._load_pixel_config()
+        if self._pixel_mp_bar:
+            val = self._read_pixel_bar(cx, cy, cw, ch, self._pixel_mp_bar, 'mp')
+            if val is not None:
+                self._mp_ratio = val
+                return val
         return self._mp_ratio
 
     def calibrate(self, sct, cx, cy, cw, ch):
+        self._load_pixel_config()
         self._last_ocr = 0
         self._ocr_busy = False
         self._bg_ocr(cx, cy, cw, ch)  # 校準時同步跑
         return self._hp_ratio >= 0
 
 bars = BarReader()
+
+# ═══════════════════════════════ 擬人化工具 ═══════════════════════════════
+
+def human_sleep(base):
+    """雙 Random 隨機延遲 — 兩個 random 疊加更接近常態分布"""
+    gap = base * 0.1
+    actual = base - gap + random.uniform(0, gap) + random.uniform(0, gap)
+    time.sleep(max(0.001, actual))
+
+def smooth_move(x, y):
+    """Bresenham 平滑滑鼠移動 — 模擬人類軌跡"""
+    try:
+        pt = ctypes.wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        x0, y0 = pt.x, pt.y
+    except:
+        move_exact(x, y)
+        return
+
+    dx, dy = x - x0, y - y0
+    dist = max(1, int(math.sqrt(dx*dx + dy*dy)))
+
+    # 短距離直接移動
+    if dist < 30:
+        move_exact(x, y)
+        return
+
+    # 長距離分段平滑移動
+    steps = min(dist // 5, 30)  # 最多 30 步
+    for i in range(1, steps + 1):
+        t = i / steps
+        # 加一點隨機抖動模擬人手
+        jx = int(x0 + dx * t) + random.randint(-1, 1)
+        jy = int(y0 + dy * t) + random.randint(-1, 1)
+        move_exact(jx, jy)
+        if i % 2 == 0:
+            time.sleep(random.uniform(0.005, 0.012))
+    move_exact(x, y)
+
+# ═══════════════════════════════ 排除區域 ═══════════════════════════════
+
+def _in_exclude_zone(px, py, cx, cy, cw, ch):
+    """判斷座標是否在 UI 排除區域（不應該掃描的地方）"""
+    sh = int(ch * 0.75)
+    # 底部 UI 區域
+    if py > cy + sh:
+        return True
+    # 右側工具欄
+    if px > cx + cw - int(cw * 0.06):
+        return True
+    # 左上角小地圖
+    if px < cx + int(cw * 0.12) and py < cy + int(sh * 0.15):
+        return True
+    # 角色中心（自己的名字/角色）
+    ccx, ccy = cx + cw // 2, cy + sh // 2
+    if abs(px - ccx) < 60 and abs(py - ccy) < 40:
+        return True
+    return False
+
+# ═══════════════════════════════ 幀差分偵測 ═══════════════════════════════
+
+class FrameDiffer:
+    """幀差分偵測遠處移動目標"""
+    def __init__(self):
+        self._prev_frame = None
+
+    def detect_movement(self, cx, cy, cw, ch, min_area=200):
+        """回傳有移動的區域中心座標列表 [(x,y), ...]"""
+        sh = int(ch * 0.75)
+        frame = grab_region(cx, cy, cw, sh)
+        if frame is None:
+            return []
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        if self._prev_frame is None:
+            self._prev_frame = gray
+            return []
+
+        # 計算幀差
+        diff = cv2.absdiff(self._prev_frame, gray)
+        self._prev_frame = gray
+        _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+
+        # 形態學去噪
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        thresh = cv2.dilate(thresh, kernel, iterations=2)
+
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        results = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < min_area:
+                continue
+            x, y, w, h = cv2.boundingRect(cnt)
+            mx, my = cx + x + w // 2, cy + y + h // 2
+            # 排除 UI 區域和角色中心
+            if not _in_exclude_zone(mx, my, cx, cy, cw, ch):
+                results.append((mx, my))
+
+        return results[:5]
+
+_frame_differ = FrameDiffer()
+
+# ═══════════════════════════════ 模板比對 ═══════════════════════════════
+
+def _confirm_target_selected(cx, cy, cw, ch):
+    """用 HSV 色域偵測確認是否成功選中目標
+    選中怪物後，怪物腳下會出現藍色/紅色選取圓圈
+    """
+    try:
+        frame, sh = grab_scene(cx, cy, cw, ch)
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        # 藍色選取圓圈 (H:100-130, S:50-255, V:50-255)
+        blue_mask = cv2.inRange(hsv, (100, 50, 50), (130, 255, 255))
+        blue_px = blue_mask.sum() // 255
+
+        # 紅色選取圓圈 (H:0-10 or 170-180, S:50-255, V:50-255)
+        red_mask1 = cv2.inRange(hsv, (0, 50, 50), (10, 255, 255))
+        red_mask2 = cv2.inRange(hsv, (170, 50, 50), (180, 255, 255))
+        red_px = (red_mask1.sum() + red_mask2.sum()) // 255
+
+        # 有足夠的藍色或紅色像素 = 選中了
+        return (blue_px + red_px) > 100
+    except:
+        return True  # 失敗時假設成功
 
 # ═══════════════════════════════ 怪物偵測 ═══════════════════════════════
 
@@ -412,17 +651,26 @@ def detect_monster_names(cx, cy, cw, ch):
     回傳螢幕絕對座標列表 [(x, y), ...]
     """
     frame, sh = grab_scene(cx, cy, cw, ch)
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # Step 1: 高閾值二值化找白色文字 (>=252)
-    _, white_mask = cv2.threshold(gray, 248, 255, cv2.THRESH_BINARY)
+    # Step 1: HSV 色域偵測白色文字（比固定 RGB 閾值對光線更強健）
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    # 白色：低飽和度、高亮度
+    white_mask = cv2.inRange(hsv, (0, 0, 220), (180, 40, 255))
 
-    # 排除角色中心和邊緣
+    # 排除角色中心和邊緣（排除區域）
     ccx, ccy = cw // 2, sh // 2
     cv2.circle(white_mask, (ccx, ccy), 80, 0, -1)
     white_mask[:15, :] = 0
     white_mask[:, :25] = 0
     white_mask[:, -25:] = 0
+    # 排除右側工具欄
+    toolbar_x = int(cw * 0.94)
+    white_mask[:, toolbar_x:] = 0
+    # 排除左上角小地圖
+    minimap_x = int(cw * 0.12)
+    minimap_y = int(sh * 0.15)
+    white_mask[:minimap_y, :minimap_x] = 0
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     # Step 2: 形態學操作 — 將文字字元連接成名字區塊
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 5))
@@ -476,10 +724,66 @@ def detect_monster_names(cx, cy, cw, ch):
     return [(x, y) for x, y, _ in filtered[:10]]
 
 
-def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰'):
+def _is_pet(px, py):
+    """偵測是否為寵物：兩行白色名字 + 紅色血條
+    寵物特徵：頭上有兩行白字（主人名+寵物名）且有紅色血條
+    """
+    try:
+        # 1. 名字區域：兩行白色文字
+        name_area = grab_region(px - 70, py - 60, 140, 40)
+        if name_area is None or name_area.size == 0:
+            return False
+
+        r_ch = name_area[:,:,2].astype(int)
+        g_ch = name_area[:,:,1].astype(int)
+        b_ch = name_area[:,:,0].astype(int)
+        white = (r_ch > 180) & (g_ch > 180) & (b_ch > 180)
+        if white.sum() < 15:
+            return False
+
+        # 兩行：上半和下半都有白色像素
+        h = name_area.shape[0]
+        if white[:h//2, :].sum() < 5 or white[h//2:, :].sum() < 5:
+            return False
+
+        # 2. 紅色血條
+        bar_area = grab_region(px - 80, py - 22, 160, 8)
+        if bar_area is not None and bar_area.size > 0:
+            br = bar_area[:,:,2].astype(int)
+            bg = bar_area[:,:,1].astype(int)
+            bb = bar_area[:,:,0].astype(int)
+            red = (br > 140) & (bg < 80) & (bb < 80)
+            if red.sum() > 30:
+                return True
+
+        return False
+    except:
+        return False
+
+def _find_pet(cx, cy, cw, ch):
+    """在畫面上找到寵物位置（兩行白字+紅色血條）
+    回傳 (x, y) 或 None
+    """
+    sh = int(ch * 0.75)
+    center_x, center_y = cx + cw // 2, cy + sh // 2
+    # 從角色附近往外找（寵物通常在角色旁邊）
+    for r in range(50, 300, 40):
+        for angle_i in range(12):
+            a = 2 * math.pi * angle_i / 12
+            px = int(center_x + r * math.cos(a))
+            py = int(center_y + r * math.sin(a))
+            if not (cx + 20 < px < cx + cw - 20 and cy + 20 < py < cy + sh - 20):
+                continue
+            if _is_pet(px, py):
+                return (px, py)
+    return None
+
+def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰', pet_filter=False, blacklist=None):
     """掃描+攻擊一體化
-    近戰：標準範圍、標準速度
-    遠程：2倍範圍、更快掃描速度
+    近戰：點擊怪物（角色自動走過去打）
+    遠程/定點/其他：按住+拖曳（觸發遠程自動攻擊）
+    pet_filter=True 時跳過寵物
+    blacklist: 怪物名稱黑名單列表
     """
     ctypes.windll.user32.SetForegroundWindow(hwnd)
     time.sleep(0.03)
@@ -503,6 +807,10 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
     elif mode == '墮落之地':
         step = max(30, int(75 * scale))
         max_radius = min(cw, sh) * 3 // 4  # 更大範圍
+        scan_delay = 0.012  # 12ms
+    elif mode == '地監':
+        step = max(25, int(65 * scale))
+        max_radius = min(cw, sh) * 3 // 4  # 大範圍掃描
         scan_delay = 0.012  # 12ms
     elif mode in ('遠程', '定點', '純定點', '墮落之地'):
         step = max(30, int(75 * scale))
@@ -528,6 +836,9 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
                 continue
             if exclude and abs(px - exclude[0]) < 80 and abs(py - exclude[1]) < 80:
                 continue
+            # 排除 UI 區域
+            if _in_exclude_zone(px, py, cx, cy, cw, ch):
+                continue
 
             move_exact(px, py)
             time.sleep(scan_delay)
@@ -550,29 +861,66 @@ def scan_and_attack(cx, cy, cw, ch, hwnd, log=None, exclude=None, mode='近戰')
                 except:
                     pass
 
+                # 寵物過濾
+                if pet_filter and _is_pet(px, py):
+                    if log:
+                        log(f"掃到寵物，跳過({px},{py})")
+                    continue
+
+                # 怪物黑名單過濾（用 OCR 辨識名字）
+                if blacklist and len(blacklist) > 0:
+                    try:
+                        name_img = grab_region(px - 60, py - 30, 120, 20)
+                        if name_img is not None:
+                            import cv2 as _cv2
+                            gray_n = _cv2.cvtColor(name_img, _cv2.COLOR_BGR2GRAY)
+                            _, mask_n = _cv2.threshold(gray_n, 180, 255, _cv2.THRESH_BINARY)
+                            big_n = _cv2.resize(mask_n, None, fx=3, fy=3)
+                            reader = get_ocr()
+                            texts = reader.readtext(big_n, detail=0)
+                            name_text = ''.join(texts)
+                            if any(b in name_text for b in blacklist):
+                                if log:
+                                    log(f"黑名單怪物[{name_text}]，跳過({px},{py})")
+                                continue
+                    except:
+                        pass
+
                 # 找到怪物！
                 if log:
                     log(f"掃{count}點→打！({px},{py})")
 
-                # 按下+拖曳攻擊
-                time.sleep(0.05)  # 讓遊戲確認游標在怪物上
-                game_down()
-                time.sleep(0.08)  # 等遊戲註冊按下事件
+                if mode in ('近戰', '地監'):
+                    # 近戰/地監：按住怪物名字不放，角色自動走過去打
+                    smooth_move(px, py)
+                    human_sleep(0.08)
+                    game_down()
+                else:
+                    # 遠程/定點/其他：按住+拖曳觸發遠程自動攻擊
+                    smooth_move(px, py)
+                    human_sleep(0.08)
+                    game_down()
+                    human_sleep(0.15)
 
-                # 所有模式統一拖曳距離（150-300px），天堂需要拖夠遠才觸發攻擊
-                drag_dist = random.randint(150, 300)
-                drag_x = px + random.randint(-15, 15)
-                drag_y = min(cy + sh - 20, py + drag_dist)
+                    drag_dist = random.randint(150, 250)
+                    drag_dx = random.randint(-15, 15)
+                    steps = 12
+                    try:
+                        for s in range(1, steps + 1):
+                            rx = drag_dx * s // steps - drag_dx * (s-1) // steps
+                            ry = drag_dist * s // steps - drag_dist * (s-1) // steps
+                            interception.move_relative(rx, ry)
+                            time.sleep(random.uniform(0.02, 0.04))
+                    except:
+                        drag_y = min(cy + sh - 20, py + drag_dist)
+                        for s in range(1, steps + 1):
+                            move_exact(
+                                px + drag_dx * s // steps,
+                                py + (drag_y - py) * s // steps)
+                            time.sleep(0.03)
 
-                steps = 5
-                for s in range(1, steps + 1):
-                    move_exact(
-                        px + (drag_x - px) * s // steps,
-                        py + (drag_y - py) * s // steps)
-                    time.sleep(0.02)
-
-                time.sleep(0.05)
-                game_up()
+                    time.sleep(0.08)
+                    game_up()
 
                 return (px, py)
 
@@ -626,36 +974,115 @@ class PreScanner:
 
 pre_scanner = PreScanner()
 
-def attack(mx, my, cx, cy, cw, ch):
-    """全 interception 攻擊：移到怪物→按下→往下拖一半→放開
-    SetCursorPos 被遊戲擋住，必須全部用 interception
-    """
-    sh = int(ch * 0.75)
-    bottom_y = cy + sh
-    half_y = my + (bottom_y - my) // 2
-    drag_x = mx + random.randint(-30, 30)
-    drag_y = half_y + random.randint(-20, 20)
-
-    # 1. 移到怪物位置（interception）
-    move_exact(mx, my)
-    time.sleep(0.1)
-
-    # 2. 按下左鍵
+def attack_melee(mx, my):
+    """近戰攻擊：移到怪物名字按住不放"""
+    smooth_move(mx, my)
+    human_sleep(0.1)
     game_down()
+
+def attack_drag(mx, my, cx, cy, cw, ch):
+    """遠程拖曳攻擊：移到怪物→按住→拖曳→放開
+    用 move_relative 做真實拖曳，遊戲用 Raw Input 才能偵測到
+    """
+    smooth_move(mx, my)
+    human_sleep(0.1)
+
+    game_down()
+    human_sleep(0.15)
+
+    drag_dist = random.randint(150, 250)
+    drag_dx = random.randint(-15, 15)
+    steps = 12
+    try:
+        for s in range(1, steps + 1):
+            rx = drag_dx * s // steps - drag_dx * (s-1) // steps
+            ry = drag_dist * s // steps - drag_dist * (s-1) // steps
+            interception.move_relative(rx, ry)
+            time.sleep(random.uniform(0.02, 0.04))
+    except:
+        sh = int(ch * 0.75)
+        drag_y = min(cy + sh - 20, my + drag_dist)
+        for s in range(1, steps + 1):
+            move_exact(
+                mx + drag_dx * s // steps,
+                my + (drag_y - my) * s // steps)
+            time.sleep(0.03)
+
     time.sleep(0.08)
-
-    # 3. 往下拖一半距離（interception）
-    steps = random.randint(4, 6)
-    for i in range(1, steps + 1):
-        ix = mx + (drag_x - mx) * i // steps
-        iy = my + (drag_y - my) * i // steps
-        move_exact(ix, iy)
-        time.sleep(random.uniform(0.015, 0.025))
-
-    time.sleep(0.05)
-
-    # 4. 放開
     game_up()
+
+def attack(mx, my, cx, cy, cw, ch):
+    """向後兼容：預設用拖曳攻擊"""
+    attack_drag(mx, my, cx, cy, cw, ch)
+
+# ═══════════════════════════════ 補血機系統 ═══════════════════════════════
+
+def _get_party_slot_pos(cx, cy, cw, ch, slot_index):
+    """取得隊伍 UI 中第 N 個成員的名字點擊座標和 HP 條座標
+    slot_index: 0-7（最多 8 人）
+    佈局：2 列 4 行，slot 0-1 在第一行，2-3 在第二行...
+    """
+    # 隊伍 UI 起始位置（比例）
+    ui_x = cx + int(cw * 0.150)  # 左邊界
+    ui_y = cy + int(ch * 0.793)  # 名字行 Y
+    slot_w = int(cw * 0.058)     # 格子寬度
+    row_h = int(ch * 0.040)      # 行高（名字+HP+間距）
+    hp_offset_y = int(ch * 0.012)  # HP 條在名字下方
+
+    col = slot_index % 2   # 0=左, 1=右
+    row = slot_index // 2  # 0-3
+
+    name_x = ui_x + col * slot_w + slot_w // 2
+    name_y = ui_y + row * row_h
+    hp_x = ui_x + col * slot_w
+    hp_y = name_y + hp_offset_y
+
+    return {
+        'name': (name_x, name_y),
+        'hp_x': hp_x,
+        'hp_y': hp_y,
+        'hp_w': slot_w,
+    }
+
+def _read_party_hp(cx, cy, cw, ch, slot_index):
+    """讀取隊伍成員的 HP 比例（0.0~1.0），-1 表示該位置沒人"""
+    pos = _get_party_slot_pos(cx, cy, cw, ch, slot_index)
+    try:
+        bar = grab_region(pos['hp_x'], pos['hp_y'], pos['hp_w'], 5)
+        if bar is None or bar.size == 0:
+            return -1
+
+        hsv = cv2.cvtColor(bar, cv2.COLOR_BGR2HSV)
+        h, s, v = hsv[:,:,0].astype(int), hsv[:,:,1].astype(int), hsv[:,:,2].astype(int)
+
+        # 紅色 HP 條：H=0-10 或 170-180, S>60, V>60
+        red_mask = ((h < 10) | (h > 170)) & (s > 60) & (v > 60)
+        red_count = red_mask.any(axis=0).sum()
+
+        # 深灰色（HP 損失）：V<50, S<40
+        dark_mask = (v < 50) & (s < 40)
+        dark_count = dark_mask.any(axis=0).sum()
+
+        total = red_count + dark_count
+        if total < 5:
+            return -1  # 沒人（沒有 HP 條）
+
+        return red_count / total
+    except:
+        return -1
+
+def _is_party_slot_occupied(cx, cy, cw, ch, slot_index):
+    """檢查隊伍位置是否有人（名字區域有白色文字）"""
+    pos = _get_party_slot_pos(cx, cy, cw, ch, slot_index)
+    try:
+        name_area = grab_region(pos['name'][0] - 30, pos['name'][1] - 8, 60, 16)
+        if name_area is None:
+            return False
+        hsv = cv2.cvtColor(name_area, cv2.COLOR_BGR2HSV)
+        white = cv2.inRange(hsv, (0, 0, 180), (180, 40, 255))
+        return white.sum() // 255 > 10
+    except:
+        return False
 
 def scan_loot(cx, cy, cw, ch, hwnd):
     sh = int(ch * 0.75)
@@ -742,8 +1169,13 @@ def save_cfg(gui):
 
 def load_cfg(gui):
     if not os.path.exists(CONFIG_FILE):return
+    _apply_cfg(gui, CONFIG_FILE)
+
+def _apply_cfg(gui, filepath):
+    """從指定 JSON 檔載入設定到 GUI"""
+    if not os.path.exists(filepath):return
     try:
-        with open(CONFIG_FILE) as f:c=json.load(f)
+        with open(filepath) as f:c=json.load(f)
         for a,v in c.items():
             if a=='monster_blacklist':gui.monster_blacklist=v;continue
             if hasattr(gui,a):
@@ -755,6 +1187,38 @@ def load_cfg(gui):
                     try:obj.set(v)
                     except:pass
     except:pass
+
+def list_profiles():
+    """列出所有設定檔名稱"""
+    profiles = []
+    for f in sorted(os.listdir(PROFILES_DIR)):
+        if f.endswith('.json'):
+            profiles.append(f[:-5])  # 去掉 .json
+    return profiles
+
+def save_profile(gui, name):
+    """儲存目前設定到指定名稱的設定檔"""
+    c={}
+    for a in dir(gui):
+        if a.startswith('var_'):
+            v=getattr(gui,a)
+            if isinstance(v,(tk.BooleanVar,tk.StringVar,tk.IntVar,tk.DoubleVar)):c[a]=v.get()
+            elif isinstance(v,list) and v and isinstance(v[0],(tk.StringVar,tk.DoubleVar)):
+                c[a]=[x.get() for x in v]
+    c['monster_blacklist']=gui.monster_blacklist
+    fp = os.path.join(PROFILES_DIR, f"{name}.json")
+    with open(fp,'w') as f:json.dump(c,f,indent=2,ensure_ascii=False)
+
+def load_profile(gui, name):
+    """從指定名稱的設定檔載入設定"""
+    fp = os.path.join(PROFILES_DIR, f"{name}.json")
+    _apply_cfg(gui, fp)
+
+def delete_profile(name):
+    """刪除指定名稱的設定檔"""
+    fp = os.path.join(PROFILES_DIR, f"{name}.json")
+    if os.path.exists(fp):
+        os.remove(fp)
 
 # ═══════════════════════════════ 回城補給方案 ═══════════════════════════════
 
@@ -792,17 +1256,28 @@ class BotApp:
         self.var_attack=tk.BooleanVar(value=True)
         self.var_roam=tk.BooleanVar(value=True)
         self.var_loot=tk.BooleanVar(value=False)
+        self.var_pet_en=tk.BooleanVar(value=False)  # 帶寵物模式
+        self.var_pet_heal_en=tk.BooleanVar(value=False)  # 寵物補血
+        self.var_pet_heal_key=tk.StringVar(value='F7')   # 治癒術快捷鍵
+        self.var_pet_heal_sec=tk.IntVar(value=30)        # 每幾秒補一次
+        self.var_pet_heal_thr=tk.IntVar(value=50)        # 血量低於%觸發
+        # 補血機
+        self.var_healer_en=tk.BooleanVar(value=False)   # 補血機開關
+        self.var_healer_key=tk.StringVar(value='F7')    # 治癒術快捷鍵
+        self.var_healer_thr=tk.IntVar(value=70)         # HP 低於此%觸發
+        self.var_healer_sec=tk.DoubleVar(value=2.0)     # 檢查間隔秒數
+        self.var_healer_self=tk.BooleanVar(value=True)  # 也補自己
         self.var_ocr_en=tk.BooleanVar(value=True)  # OCR 偵測開關
         # 墮落之地定時北移
         self.var_fallen_walk_en=tk.BooleanVar(value=True)
         self.var_fallen_walk_min=tk.IntVar(value=5)    # 每幾分鐘
         self.var_fallen_walk_sec=tk.IntVar(value=10)   # 點幾秒
         self.var_hp_en=tk.BooleanVar(value=True)
-        self.var_hp_sec=tk.IntVar(value=8)       # 定時喝紅水秒數
+        self.var_hp_sec=tk.IntVar(value=60)      # 定時喝紅水秒數
         self.var_mp_en=tk.BooleanVar(value=False)
-        self.var_mp_sec=tk.IntVar(value=10)      # 定時喝藍水秒數
+        self.var_mp_sec=tk.IntVar(value=60)      # 定時喝藍水秒數
         self.var_heal_en=tk.BooleanVar(value=True)
-        self.var_heal_sec=tk.IntVar(value=15)    # 定時治癒術秒數
+        self.var_heal_sec=tk.IntVar(value=60)    # 定時治癒術秒數
         self.var_buff_en=tk.BooleanVar(value=True)
         self.var_recall_en=tk.BooleanVar(value=False)
         self.var_antipk=tk.BooleanVar(value=False)
@@ -827,6 +1302,21 @@ class BotApp:
         self.var_pk_act=tk.StringVar(value='回城')
         self.var_hotkey=tk.StringVar(value='left windows')
 
+        # 多組喝水配置（3 組，不同血量觸發不同藥水）
+        self.var_pot_en = [tk.BooleanVar(value=(i==0)) for i in range(3)]
+        self.var_pot_thr = [tk.IntVar(value=[60,40,20][i]) for i in range(3)]
+        self.var_pot_key = [tk.StringVar(value=['F5','F5','F5'][i]) for i in range(3)]
+        self.var_pot_type = [tk.StringVar(value=['紅水','橙水','萬能藥'][i]) for i in range(3)]
+
+        # 反 PK 偵測
+        self.var_antipk_en=tk.BooleanVar(value=False)
+        self.var_antipk_act=tk.StringVar(value='回城')  # 回城/逃跑/警示
+
+        # 自動販賣
+        self.var_autosell_en=tk.BooleanVar(value=False)
+        self.var_autosell_full=tk.IntVar(value=80)      # 背包滿度%觸發
+        self.var_autosell_recall=tk.StringVar(value='F12')  # 回城卷快捷鍵
+
         # 遠程
         self.var_rng_key=tk.StringVar(value='F1')
         self.var_rng_dist=tk.IntVar(value=150)
@@ -847,7 +1337,7 @@ class BotApp:
         # 定時按鍵 (4組)
         self.var_timer_en=[tk.BooleanVar(value=False) for _ in range(4)]
         self.var_timer_key=[tk.StringVar(value='無') for _ in range(4)]
-        self.var_timer_sec=[tk.DoubleVar(value=10.0) for _ in range(4)]
+        self.var_timer_sec=[tk.DoubleVar(value=60.0) for _ in range(4)]
         self.var_timer_cnt=[tk.IntVar(value=1) for _ in range(4)]
 
         # 回城補給方案 (3套)
@@ -961,6 +1451,19 @@ class BotApp:
         info=f"點擊:{'interception' if HAS_INTERCEPTION else 'mouse_lib'} | 怪物庫:{len(MONSTER_NAMES)}隻"
         tk.Label(p,text=info,bg=BG2,fg='#27ae60' if HAS_INTERCEPTION else '#f5a623',font=('Consolas',7)).pack()
 
+        # 設定檔管理
+        sf_prof=self._section(p,"設定檔");sf_prof.pack(fill='x',padx=10,pady=3)
+        r=self._frame(sf_prof);r.pack(fill='x',pady=2)
+        self.var_profile=tk.StringVar(value='')
+        self.profile_combo=self._combo(r,self.var_profile,list_profiles(),w=14)
+        self.profile_combo.pack(side='left',padx=2)
+        tk.Button(r,text="載入",font=FONTS,bg='#2980b9',fg='white',
+                  command=self._load_profile).pack(side='left',padx=2)
+        tk.Button(r,text="儲存",font=FONTS,bg='#27ae60',fg='white',
+                  command=self._save_profile).pack(side='left',padx=2)
+        tk.Button(r,text="刪除",font=FONTS,bg=ACC,fg='white',
+                  command=self._delete_profile).pack(side='left',padx=2)
+
         # Debug
         r=self._frame(p);r.pack(fill='x',padx=10,pady=2)
         tk.Button(r,text="HP偵測截圖",font=FONTS,bg='#8e44ad',fg='white',command=self._debug_hp).pack(side='left',padx=3)
@@ -969,6 +1472,41 @@ class BotApp:
         sf=self._section(p,"日誌");sf.pack(fill='both',padx=10,pady=(5,10),expand=True)
         self.log_w=tk.Text(sf,height=8,bg='#0d1117',fg='#58a6ff',font=('Consolas',8),state='disabled',wrap='word')
         self.log_w.pack(fill='both',expand=True)
+
+    def _refresh_profiles(self):
+        """更新設定檔下拉選單"""
+        profiles = list_profiles()
+        self.profile_combo['values'] = profiles
+
+    def _save_profile(self):
+        name = self.var_profile.get().strip()
+        if not name:
+            from tkinter import simpledialog
+            name = simpledialog.askstring("儲存設定檔", "請輸入設定檔名稱:", parent=self.root)
+        if not name:return
+        save_profile(self, name)
+        self.var_profile.set(name)
+        self._refresh_profiles()
+        self.log(f"設定已儲存: {name}")
+
+    def _load_profile(self):
+        name = self.var_profile.get().strip()
+        if not name:
+            self.log("請先選擇設定檔")
+            return
+        load_profile(self, name)
+        self.log(f"設定已載入: {name}")
+
+    def _delete_profile(self):
+        name = self.var_profile.get().strip()
+        if not name:return
+        from tkinter import messagebox
+        if not messagebox.askyesno("刪除設定檔", f"確定刪除「{name}」？", parent=self.root):
+            return
+        delete_profile(name)
+        self.var_profile.set('')
+        self._refresh_profiles()
+        self.log(f"設定已刪除: {name}")
 
     def _debug_hp(self):
         """截圖並標記 HP/MP 條偵測位置，存到桌面"""
@@ -1013,6 +1551,7 @@ class BotApp:
         self._chk(r,"啟用",self.var_attack).pack(side='left')
         self._chk(r,"漫遊",self.var_roam).pack(side='left',padx=8)
         self._chk(r,"撿物",self.var_loot).pack(side='left',padx=8)
+        self._chk(r,"帶寵物",self.var_pet_en).pack(side='left',padx=8)
         r=self._frame(sf);r.pack(fill='x',pady=2)
         self._lbl(r,"漫遊距離:").pack(side='left')
         self._spin(r,self.var_roam_dist,50,500,w=4,inc=50).pack(side='left')
@@ -1042,67 +1581,88 @@ class BotApp:
         self.monster_blacklist=[]
         self.bl_text.config(text="目前: 無")
 
-    # ═══ 生存頁 ═══
+    # ═══ 生存頁（ROBOBEAR 風格：緊湊一行式佈局） ═══
     def _build_survival(self):
         p=self.pages['生存']
-        def mkrow(label,en,key,thr,extra=None):
-            sf=self._section(p,label);sf.pack(fill='x',padx=10,pady=3)
-            r=self._frame(sf);r.pack(fill='x',pady=2)
-            self._chk(r,"啟用",en).pack(side='left')
-            self._lbl(r,"鍵:").pack(side='left',padx=(8,1))
-            self._combo(r,key,FKEYS,w=3).pack(side='left')
-            self._lbl(r,"<").pack(side='left',padx=(8,0))
-            self._spin(r,thr,5,90,w=3,inc=5).pack(side='left')
-            self._lbl(r,"%").pack(side='left')
-            if extra:extra(r)
 
-        # OCR 開關
-        r=self._frame(p);r.pack(fill='x',padx=10,pady=3)
-        self._chk(r,"HP/MP OCR偵測（關閉=定時喝水）",self.var_ocr_en).pack(side='left')
-
-        # 定時喝水秒數（OCR 關閉時使用）
-        sf_timer=self._section(p,"定時喝水（OCR關閉時）");sf_timer.pack(fill='x',padx=10,pady=3)
-        r=self._frame(sf_timer);r.pack(fill='x',pady=2)
-        self._lbl(r,"紅水 每").pack(side='left')
-        self._spin(r,self.var_hp_sec,3,60,w=3,inc=1).pack(side='left')
-        self._lbl(r,"秒").pack(side='left')
-        self._lbl(r,"   藍水 每").pack(side='left')
-        self._spin(r,self.var_mp_sec,3,60,w=3,inc=1).pack(side='left')
-        self._lbl(r,"秒").pack(side='left')
-        self._lbl(r,"   治癒 每").pack(side='left')
-        self._spin(r,self.var_heal_sec,3,60,w=3,inc=1).pack(side='left')
-        self._lbl(r,"秒").pack(side='left')
-
-        mkrow("紅水(HP)",self.var_hp_en,self.var_hp_key,self.var_hp_thr)
-        mkrow("藍水(MP)",self.var_mp_en,self.var_mp_key,self.var_mp_thr)
-        def heal_ex(r):
-            self._lbl(r," x").pack(side='left')
-            self._spin(r,self.var_heal_n,1,5,w=2).pack(side='left')
-        mkrow("治癒術",self.var_heal_en,self.var_heal_key,self.var_heal_thr,heal_ex)
-
-        sf=self._section(p,"Buff / 緊急回城");sf.pack(fill='x',padx=10,pady=3)
-        r=self._frame(sf);r.pack(fill='x',pady=2)
-        self._chk(r,"Buff",self.var_buff_en).pack(side='left')
-        self._lbl(r,"鍵:").pack(side='left',padx=(4,1))
-        self._combo(r,self.var_buff_key,FKEYS,w=3).pack(side='left')
-        self._lbl(r,"每").pack(side='left',padx=(4,0))
-        self._spin(r,self.var_buff_sec,60,3600,w=5,inc=60).pack(side='left')
-        self._lbl(r,"秒").pack(side='left')
-        r=self._frame(sf);r.pack(fill='x',pady=2)
-        self._chk(r,"緊急回城",self.var_recall_en).pack(side='left')
-        self._lbl(r,"鍵:").pack(side='left',padx=(4,1))
-        self._combo(r,self.var_recall_key,FKEYS,w=3).pack(side='left')
-        self._lbl(r,"HP<").pack(side='left',padx=(4,0))
-        self._spin(r,self.var_recall_thr,5,30,w=3,inc=5).pack(side='left')
+        # ── 喝水保護 ──
+        sf=self._section(p,"⚔ 喝水保護");sf.pack(fill='x',padx=8,pady=2)
+        r=self._frame(sf);r.pack(fill='x',pady=1)
+        self._chk(r,"喝水保護",self.var_hp_en).pack(side='left')
+        self._combo(r,self.var_hp_key,FKEYS,w=3).pack(side='left',padx=3)
+        self._lbl(r,"HP低於").pack(side='left')
+        self._spin(r,self.var_hp_thr,5,90,w=3,inc=5).pack(side='left')
+        self._lbl(r,"%").pack(side='left')
+        r=self._frame(sf);r.pack(fill='x',pady=1)
+        self._chk(r,"藍水保護",self.var_mp_en).pack(side='left')
+        self._combo(r,self.var_mp_key,FKEYS,w=3).pack(side='left',padx=3)
+        self._lbl(r,"MP低於").pack(side='left')
+        self._spin(r,self.var_mp_thr,5,90,w=3,inc=5).pack(side='left')
         self._lbl(r,"%").pack(side='left')
 
-        # 回城補給方案
-        sf=self._section(p,"回城補給方案 (3套)");sf.pack(fill='x',padx=10,pady=3)
-        presets=list(SUPPLY_PRESETS.keys())
+        # 多組喝水
+        pot_types = ['紅水','橙水','萬能藥','肉','自訂']
         for i in range(3):
             r=self._frame(sf);r.pack(fill='x',pady=1)
-            self._lbl(r,f"方案{i+1}:").pack(side='left')
-            self._combo(r,self.var_supply[i],presets,w=12).pack(side='left',padx=2)
+            self._chk(r,f"喝水{i+2}",self.var_pot_en[i]).pack(side='left')
+            self._combo(r,self.var_pot_key[i],FKEYS,w=3).pack(side='left',padx=3)
+            self._combo(r,self.var_pot_type[i],pot_types,w=5).pack(side='left',padx=2)
+            self._lbl(r,"HP<").pack(side='left')
+            self._spin(r,self.var_pot_thr[i],5,95,w=3,inc=5).pack(side='left')
+            self._lbl(r,"%").pack(side='left')
+
+        # ── 自補保護 ──
+        sf=self._section(p,"✚ 自補保護");sf.pack(fill='x',padx=8,pady=2)
+        r=self._frame(sf);r.pack(fill='x',pady=1)
+        self._chk(r,"治癒術",self.var_heal_en).pack(side='left')
+        self._combo(r,self.var_heal_key,FKEYS,w=3).pack(side='left',padx=3)
+        self._lbl(r,"HP低於").pack(side='left')
+        self._spin(r,self.var_heal_thr,5,90,w=3,inc=5).pack(side='left')
+        self._lbl(r,"%  x").pack(side='left')
+        self._spin(r,self.var_heal_n,1,5,w=2).pack(side='left')
+
+        # ── Buff 施放 ──
+        sf=self._section(p,"✦ 自動施放Buff");sf.pack(fill='x',padx=8,pady=2)
+        r=self._frame(sf);r.pack(fill='x',pady=1)
+        self._chk(r,"綠水/Buff",self.var_buff_en).pack(side='left')
+        self._combo(r,self.var_buff_key,FKEYS,w=3).pack(side='left',padx=3)
+        self._lbl(r,"每").pack(side='left')
+        self._spin(r,self.var_buff_sec,60,3600,w=5,inc=60).pack(side='left')
+        self._lbl(r,"秒").pack(side='left')
+
+        # ── 回村保護 ──
+        sf=self._section(p,"⛨ 回村保護");sf.pack(fill='x',padx=8,pady=2)
+        r=self._frame(sf);r.pack(fill='x',pady=1)
+        self._chk(r,"緊急回城",self.var_recall_en).pack(side='left')
+        self._combo(r,self.var_recall_key,FKEYS,w=3).pack(side='left',padx=3)
+        self._lbl(r,"HP低於").pack(side='left')
+        self._spin(r,self.var_recall_thr,5,30,w=3,inc=5).pack(side='left')
+        self._lbl(r,"%").pack(side='left')
+        r=self._frame(sf);r.pack(fill='x',pady=1)
+        self._chk(r,"自動回城販賣",self.var_autosell_en).pack(side='left')
+        self._combo(r,self.var_autosell_recall,FKEYS,w=3).pack(side='left',padx=3)
+        self._lbl(r,"背包>").pack(side='left')
+        self._spin(r,self.var_autosell_full,50,95,w=3,inc=5).pack(side='left')
+        self._lbl(r,"%").pack(side='left')
+
+        # ── 反 PK 偵測 ──
+        sf=self._section(p,"⚠ 反PK偵測");sf.pack(fill='x',padx=8,pady=2)
+        r=self._frame(sf);r.pack(fill='x',pady=1)
+        self._chk(r,"偵測玩家",self.var_antipk_en).pack(side='left')
+        self._lbl(r,"動作:").pack(side='left',padx=(8,1))
+        self._combo(r,self.var_antipk_act,['回城','逃跑','警示'],w=5).pack(side='left')
+
+        # ── 定時保底（OCR 關閉時） ──
+        sf=self._section(p,"⏱ 定時保底（OCR關閉時）");sf.pack(fill='x',padx=8,pady=2)
+        r=self._frame(sf);r.pack(fill='x',pady=1)
+        self._chk(r,"OCR偵測",self.var_ocr_en).pack(side='left')
+        self._lbl(r,"  紅水每").pack(side='left')
+        self._spin(r,self.var_hp_sec,3,60,w=3,inc=1).pack(side='left')
+        self._lbl(r,"s  藍水每").pack(side='left')
+        self._spin(r,self.var_mp_sec,3,60,w=3,inc=1).pack(side='left')
+        self._lbl(r,"s  治癒每").pack(side='left')
+        self._spin(r,self.var_heal_sec,3,60,w=3,inc=1).pack(side='left')
+        self._lbl(r,"s").pack(side='left')
 
     # ═══ 技能頁 ═══
     def _build_skills(self):
@@ -1289,7 +1849,7 @@ class BotApp:
         p=self.pages['模式']
         sf=self._section(p,"掛機模式");sf.pack(fill='x',padx=10,pady=5)
         r=self._frame(sf);r.pack(fill='x',pady=3)
-        for m in ['近戰','遠程','定點','純定點','墮落之地','召喚','隊伍']:
+        for m in ['近戰','遠程','定點','純定點','墮落之地','召喚','隊伍','地監','補血機']:
             tk.Radiobutton(r,text=m,variable=self.var_mode,value=m,bg=BG2,fg=FG,
                            selectcolor=ACC2,activebackground=BG2,font=FONTS,
                            command=self._on_mode).pack(side='left',padx=6)
@@ -1352,6 +1912,33 @@ class BotApp:
         self._combo(r,self.var_pt_heal,FKEYS,w=3).pack(side='left')
         self._lbl(r,"Buff鍵:").pack(side='left',padx=(8,0))
         self._combo(r,self.var_pt_buff,FKEYS,w=3).pack(side='left')
+        # 地監
+        f=self._section(p,"地監設定");self.mode_frames['地監']=f
+        r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
+        self._chk(r,"寵物補血",self.var_pet_heal_en).pack(side='left')
+        self._lbl(r,"治癒鍵:").pack(side='left',padx=(8,1))
+        self._combo(r,self.var_pet_heal_key,FKEYS,w=3).pack(side='left')
+        self._lbl(r,"每").pack(side='left',padx=(8,1))
+        self._spin(r,self.var_pet_heal_sec,10,120,w=3,inc=5).pack(side='left')
+        self._lbl(r,"秒").pack(side='left')
+        tk.Label(f,text="帶寵物刷地監專用\n按住怪物攻擊 + 自動過濾寵物\n打死後 F4 拾取 + 掃描撿物",bg=BG2,fg='#888',font=FONTS).pack(padx=6,pady=6)
+
+        # 補血機
+        f=self._section(p,"補血機設定");self.mode_frames['補血機']=f
+        r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
+        self._chk(r,"啟用補血機",self.var_healer_en).pack(side='left')
+        self._lbl(r,"治癒鍵:").pack(side='left',padx=(8,1))
+        self._combo(r,self.var_healer_key,FKEYS,w=3).pack(side='left')
+        r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
+        self._lbl(r,"HP<").pack(side='left')
+        self._spin(r,self.var_healer_thr,20,90,w=3,inc=10).pack(side='left')
+        self._lbl(r,"% 觸發").pack(side='left')
+        self._lbl(r,"  每").pack(side='left')
+        self._spin(r,self.var_healer_sec,0.5,10,w=4,inc=0.5).pack(side='left')
+        self._lbl(r,"秒檢查").pack(side='left')
+        r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
+        self._chk(r,"也補自己",self.var_healer_self).pack(side='left')
+        tk.Label(f,text="站著不動，專門幫隊友補血\n偵測隊伍 UI 的 HP 條\n點治癒鍵 → 點隊友名字",bg=BG2,fg='#888',font=FONTS).pack(padx=6,pady=6)
 
         self._on_mode()
 
@@ -1610,13 +2197,20 @@ class BotApp:
         bottom_y = cy + int(ch * 0.91)
         top_y = bottom_y - int(ch * 0.060)
 
-        # F12→F9 的 X 位置（從右往左）
+        # F12→F9 的 X 位置（從右往左）— 下排
         x12 = right_edge - big_w // 2
         x_map = {12: x12, 11: x12 - big_w, 10: x12 - big_w*2, 9: x12 - big_w*3}
+        # F5-F8 上排（跟 F9-F12 同 X，不同 Y）
         x_map[5] = x_map[9]
         x_map[6] = x_map[10]
         x_map[7] = x_map[11]
         x_map[8] = x_map[12]
+        # F1-F4：在 F5-F8 再上面一排
+        top2_y = top_y - int(ch * 0.060)
+        x_map[1] = x_map[5]
+        x_map[2] = x_map[6]
+        x_map[3] = x_map[7]
+        x_map[4] = x_map[8]
 
         # 解析 slot_key（"F5" → 5）
         try:
@@ -1626,7 +2220,12 @@ class BotApp:
         if num not in x_map:
             return None
 
-        y = top_y if num <= 8 else bottom_y
+        if num <= 4:
+            y = top2_y
+        elif num <= 8:
+            y = top_y
+        else:
+            y = bottom_y
         return (x_map[num], y)
 
     def _click_hotbar(self, cx, cy, cw, ch, slot_key, clicks=2):
@@ -1641,16 +2240,19 @@ class BotApp:
 
         x, y = pos
         # 確保滑鼠完全放開（攻擊拖曳可能還在）
-        interception.mouse_up('left')
+        try:
+            game_up()
+        except:
+            pass
         time.sleep(0.2)
         # 移到快捷欄
         move_exact(x, y)
         time.sleep(0.25)
-        # 連點
+        # 連點（用 game_click 有 fallback）
         for i in range(clicks):
-            interception.mouse_down('left')
+            game_down()
             time.sleep(0.04)
-            interception.mouse_up('left')
+            game_up()
             if i < clicks - 1:
                 time.sleep(0.12)
         time.sleep(0.15)
@@ -1669,11 +2271,21 @@ class BotApp:
         hp = mp = 1.0
         if self.var_ocr_en.get():
             try:
+                prev_hp = getattr(self, '_prev_hp', 1.0)
                 hp = bars.hp(None, cx, cy, cw, ch)
                 self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max)
                 mp = bars.mp(None, cx, cy, cw, ch)
                 if mp >= 0:
                     self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max)
+
+                # HP 急降即時反應：掉超過 20% 立即喝紅水
+                if hp >= 0 and prev_hp - hp > 0.20 and self.var_hp_en.get():
+                    self.log(f"HP急降！{prev_hp*100:.0f}%→{hp*100:.0f}%")
+                    k = self.var_hp_key.get()
+                    self._click_hotbar(cx, cy, cw, ch, k)
+                    timers['hp'] = now
+                    self.pots += 1
+                self._prev_hp = hp
             except:
                 pass
         else:
@@ -1694,7 +2306,7 @@ class BotApp:
             time.sleep(0.3)
             timers['buff'] = now
             self.buffs += 1
-            self.log(f"喝綠水({key})")
+            self.log(f"喝綠水({k})")
 
         # 死亡（僅在 HP 成功讀取時判定）
         if hp >= 0 and hp <= 0.01:
@@ -1707,10 +2319,11 @@ class BotApp:
         # 緊急回城（最高優先，僅在 HP 成功讀取時觸發）
         if self.var_recall_en.get() and hp >= 0 and hp < self.var_recall_thr.get() / 100:
             ctypes.windll.user32.SetForegroundWindow(hwnd)
-            press_key(self.var_recall_key.get())
+            self._click_hotbar(cx, cy, cw, ch, self.var_recall_key.get(), clicks=2)
             self.log(f"緊急回城！HP={hp*100:.0f}%")
             alert('hp')
-            # 不停止 bot，等待回城後可以重播路徑回來
+            self.running = False
+            self._status("緊急回城", ACC)
             time.sleep(5)
             return hp, mp
 
@@ -1759,12 +2372,59 @@ class BotApp:
             self.mpots += 1
             self.log(f"喝藍水({k}) MP={mp_cur}/{mp_max}")
 
+        # 多組喝水（按優先級：閾值高的先觸發）
+        if hp >= 0:
+            for i in range(3):
+                if not self.var_pot_en[i].get():
+                    continue
+                pot_timer = f'pot_{i}'
+                if pot_timer not in timers:
+                    timers[pot_timer] = 0
+                pot_thr = self.var_pot_thr[i].get() / 100
+                if hp < pot_thr and now - timers[pot_timer] > 4:
+                    k = self.var_pot_key[i].get()
+                    self._click_hotbar(cx, cy, cw, ch, k)
+                    timers[pot_timer] = now
+                    self.pots += 1
+                    self.log(f"多組喝水#{i+1} {self.var_pot_type[i].get()}({k}) HP={hp*100:.0f}%")
+                    break  # 一次只喝一瓶，下次再檢查
+
+        # 反 PK 偵測（偵測畫面中的玩家粉紅色名字）
+        if self.var_antipk_en.get() and hp >= 0:
+            pk_timer = timers.get('pk_check', 0)
+            if now - pk_timer > 3:  # 每 3 秒檢查一次
+                try:
+                    frame, sh = grab_scene(cx, cy, cw, ch)
+                    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                    # 粉紅色玩家名字 H=150-170, S>50, V>100
+                    pink = cv2.inRange(hsv, (150, 50, 100), (170, 255, 255))
+                    pink_count = pink.sum() // 255
+                    if pink_count > 50:  # 有大量粉紅像素 = 有玩家
+                        act = self.var_antipk_act.get()
+                        self.log(f"偵測到玩家！({pink_count}px) 動作:{act}")
+                        alert('pk')
+                        if act == '回城':
+                            self._click_hotbar(cx, cy, cw, ch, self.var_recall_key.get(), clicks=2)
+                            self.running = False
+                            self._status("PK回城", ACC)
+                            return hp, mp
+                        elif act == '逃跑':
+                            # 隨機方向逃跑
+                            sh_s = int(ch * 0.75)
+                            fx = cx + random.randint(50, cw-50)
+                            fy = cy + random.randint(50, sh_s-50)
+                            game_click(fx, fy)
+                            time.sleep(2)
+                except:
+                    pass
+                timers['pk_check'] = now
+
         # Buff
         # 召喚重召喚
         mode = self.var_mode.get()
         if mode == '召喚' and now - timers['summon'] > self.var_sum_sec.get():
             ctypes.windll.user32.SetForegroundWindow(hwnd)
-            press_key(self.var_sum_key.get())
+            self._click_hotbar(cx, cy, cw, ch, self.var_sum_key.get(), clicks=4)
             timers['summon'] = now
             self.log("重召喚")
 
@@ -1784,10 +2444,30 @@ class BotApp:
                 time.sleep(0.1)
                 cnt = self.var_timer_cnt[i].get()
                 for _ in range(cnt):
-                    press_key(tkey)
+                    self._click_hotbar(cx, cy, cw, ch, tkey, clicks=2)
                     time.sleep(0.15)
                 timers[timer_name] = now
                 self.log(f"定時按鍵#{i+1}: {tkey} x{cnt}")
+
+        # 寵物補血（地監模式）
+        # 有血條 = 受傷（滿血時血條不顯示），找到就補
+        if self.var_pet_heal_en.get() and self.var_mode.get() == '地監':
+            pet_timer = timers.get('pet_heal', 0)
+            if now - pet_timer > self.var_pet_heal_sec.get():
+                # 找受傷的寵物（兩行白字+紅色血條=受傷中）
+                pet_pos = _find_pet(cx, cy, cw, ch)
+                if pet_pos:
+                    # 有血條就代表受傷，點治癒鍵 → 點擊寵物補血
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    self._click_hotbar(cx, cy, cw, ch, self.var_pet_heal_key.get(), clicks=4)
+                    time.sleep(0.2)
+                    game_click(pet_pos[0], pet_pos[1])
+                    time.sleep(0.3)
+                    self.log(f"寵物補血({pet_pos[0]},{pet_pos[1]})")
+                    # 回到怪物位置
+                    if hasattr(self, '_combat_monster') and self._combat_monster:
+                        move_exact(self._combat_monster[0], self._combat_monster[1])
+                timers['pet_heal'] = now
 
         self._stats()
         return hp, mp
@@ -1797,12 +2477,12 @@ class BotApp:
         ctypes.windll.user32.SetForegroundWindow(hwnd)
         time.sleep(0.1)
         mode = self.var_mode.get()
-        if mode == '近戰':
-            attack(mx, my, cx, cy, cw, ch)
+        if mode in ('近戰', '地監'):
+            attack_melee(mx, my)
         elif mode == '遠程':
-            attack(mx, my, cx, cy, cw, ch)
+            attack_drag(mx, my, cx, cy, cw, ch)
             time.sleep(0.2)
-            press_key(self.var_rng_key.get())
+            self._click_hotbar(cx, cy, cw, ch, self.var_rng_key.get(), clicks=2)
             # 後退保持距離
             sh = int(ch * 0.75)
             d = self.var_rng_dist.get()
@@ -1810,50 +2490,70 @@ class BotApp:
             dd = max(1, math.sqrt(dx * dx + dy * dy))
             sx = max(cx + 50, min(cx + cw - 50, mx + int(dx / dd * d)))
             sy = max(cy + 30, min(cy + sh - 30, my + int(dy / dd * d)))
-            move_exact(sx, sy)
+            smooth_move(sx, sy)
             game_click(sx, sy)
         elif mode in ('定點', '純定點', '墮落之地'):
-            # 定點：按攻擊鍵 → 移到怪物 → 按住 → 拖曳 → 放開
-            press_key(self.var_rng_key.get())
+            # 定點：點攻擊鍵 → 移到怪物 → 按住 → 拖曳 → 放開
+            self._click_hotbar(cx, cy, cw, ch, self.var_rng_key.get(), clicks=2)
             time.sleep(0.1)
-            move_exact(mx, my)
-            time.sleep(0.08)
+            smooth_move(mx, my)
+            human_sleep(0.08)
             game_down()
+            human_sleep(0.15)
+            drag_dist = random.randint(150, 250)
+            drag_dx = random.randint(-15, 15)
+            steps = 12
+            try:
+                for s in range(1, steps + 1):
+                    rx = drag_dx * s // steps - drag_dx * (s-1) // steps
+                    ry = drag_dist * s // steps - drag_dist * (s-1) // steps
+                    interception.move_relative(rx, ry)
+                    time.sleep(random.uniform(0.02, 0.04))
+            except:
+                drag_y = my + drag_dist
+                for s in range(1, steps + 1):
+                    move_exact(
+                        mx + drag_dx * s // steps,
+                        my + (drag_y - my) * s // steps)
+                    time.sleep(0.03)
             time.sleep(0.08)
-            drag_y = my + random.randint(150, 300)
-            drag_x = mx + random.randint(-15, 15)
-            for s in range(1, 5):
-                move_exact(mx + (drag_x - mx) * s // 4, my + (drag_y - my) * s // 4)
-                time.sleep(0.02)
-            time.sleep(0.05)
             game_up()
         elif mode == '召喚':
-            attack(mx, my, cx, cy, cw, ch)
-            press_key(self.var_sum_atk.get())
+            attack_drag(mx, my, cx, cy, cw, ch)
+            self._click_hotbar(cx, cy, cw, ch, self.var_sum_atk.get(), clicks=2)
             sh = int(ch * 0.75)
             move_exact(cx + cw // 2, cy + sh // 2)
             game_click()
         elif mode == '隊伍':
             role = self.var_pt_role.get()
             if role in ('坦克', '輸出'):
-                attack(mx, my, cx, cy, cw, ch)
+                attack_melee(mx, my)
             elif role == '補師':
-                press_key(self.var_pt_heal.get())
+                self._click_hotbar(cx, cy, cw, ch, self.var_pt_heal.get(), clicks=4)
             elif role == '輔助':
-                press_key(self.var_pt_buff.get())
-                attack(mx, my, cx, cy, cw, ch)
+                self._click_hotbar(cx, cy, cw, ch, self.var_pt_buff.get(), clicks=4)
+                attack_melee(mx, my)
 
-    def _combat_skill(self):
-        """戰鬥中持續施放技能（依模式）"""
+    def _combat_skill(self, cx=0, cy=0, cw=0, ch=0):
+        """戰鬥中持續施放技能（依模式，用滑鼠點快捷欄）"""
         mode = self.var_mode.get()
-        if mode == '近戰':
+        if mode in ('近戰', '地監'):
             skills.use_next()
         elif mode in ('遠程', '定點', '純定點', '墮落之地'):
-            press_key(self.var_rng_key.get())
+            if cw > 0:
+                self._click_hotbar(cx, cy, cw, ch, self.var_rng_key.get(), clicks=2)
+            else:
+                press_key(self.var_rng_key.get())
         elif mode == '召喚':
-            press_key(self.var_sum_atk.get())
+            if cw > 0:
+                self._click_hotbar(cx, cy, cw, ch, self.var_sum_atk.get(), clicks=2)
+            else:
+                press_key(self.var_sum_atk.get())
         elif mode == '隊伍' and self.var_pt_role.get() == '補師':
-            press_key(self.var_pt_heal.get())
+            if cw > 0:
+                self._click_hotbar(cx, cy, cw, ch, self.var_pt_heal.get(), clicks=4)
+            else:
+                press_key(self.var_pt_heal.get())
 
     def _loop(self):
         timers = {'hp': 0, 'mp': 0, 'heal': 0, 'buff': 0, 'summon': 0}
@@ -1904,22 +2604,25 @@ class BotApp:
         ctypes.windll.user32.SetForegroundWindow(hwnd_start)
         time.sleep(0.2)
 
-        # 1. 立刻喝綠水
+        # 1. 立刻喝綠水（用滑鼠點快捷欄）
         if self.var_buff_en.get():
-            key = self.var_buff_key.get().lower()
-            keyboard.press(key)
-            time.sleep(0.05)
-            keyboard.release(key)
+            k = self.var_buff_key.get()
+            self._click_hotbar(cx_s, cy_s, cw_s, ch_s, k, clicks=5)
             timers['buff'] = time.time()
             self.buffs += 1
-            self.log(f"啟動喝綠水({key})")
+            self.log(f"啟動喝綠水({k})")
             time.sleep(0.5)
 
-        # 2. 打開小地圖 (Ctrl+M)
-        keyboard.press('ctrl')
-        time.sleep(0.05)
-        press_key_raw('m')
-        keyboard.release('ctrl')
+        # 2. 打開小地圖 (Ctrl+M) — 用 interception 鍵盤
+        try:
+            interception.press('ctrl')
+            time.sleep(0.05)
+            interception.press('m')
+        except:
+            keyboard.press('ctrl')
+            time.sleep(0.05)
+            press_key_raw('m')
+            keyboard.release('ctrl')
         time.sleep(0.5)
 
         # 3. 記錄小地圖上角色初始位置
@@ -1988,6 +2691,42 @@ class BotApp:
                     timers[timer_key] = time.time()
                     self.log("北移完成，繼續掃描")
 
+            # ── 補血機模式 ──
+            if self.var_mode.get() == '補血機' and self.var_healer_en.get():
+                healer_timer = timers.get('healer', 0)
+                now_h = time.time()
+                if now_h - healer_timer > self.var_healer_sec.get():
+                    self._status("補血機", '#27ae60')
+                    thr = self.var_healer_thr.get() / 100
+                    healed = False
+                    # 掃描所有隊友（slot 0=自己, 1-7=隊友）
+                    start_slot = 0 if self.var_healer_self.get() else 1
+                    for slot in range(start_slot, 8):
+                        if not _is_party_slot_occupied(cx, cy, cw, ch, slot):
+                            continue
+                        hp_ratio = _read_party_hp(cx, cy, cw, ch, slot)
+                        if hp_ratio < 0:
+                            continue
+                        if hp_ratio < thr:
+                            # 需要補血！點治癒鍵 → 點隊友名字
+                            ctypes.windll.user32.SetForegroundWindow(hwnd)
+                            self._click_hotbar(cx, cy, cw, ch, self.var_healer_key.get(), clicks=4)
+                            human_sleep(0.2)
+                            pos = _get_party_slot_pos(cx, cy, cw, ch, slot)
+                            game_click(pos['name'][0], pos['name'][1])
+                            human_sleep(0.3)
+                            self.heals += 1
+                            self.log(f"補血 slot{slot} HP={hp_ratio*100:.0f}%")
+                            healed = True
+                            break  # 一次補一個，下次再檢查
+                    if not healed:
+                        self._status("補血機待命", '#27ae60')
+                    timers['healer'] = now_h
+                    self._stats()
+                else:
+                    time.sleep(0.1)
+                continue  # 補血機不打怪
+
             # ── 自動練功循環 ──
             if not self.var_attack.get():
                 time.sleep(0.5)
@@ -1998,7 +2737,9 @@ class BotApp:
 
             # 掃描+攻擊一體化（碰到怪物瞬間就打）
             self._set_state(BotState.SCANNING)
-            mon = scan_and_attack(cx, cy, cw, ch, hwnd, self.log, mode=mode)
+            pet = self.var_pet_en.get() or mode == '地監'  # 地監模式強制過濾寵物
+            bl = getattr(self, 'monster_blacklist', [])
+            mon = scan_and_attack(cx, cy, cw, ch, hwnd, self.log, mode=mode, pet_filter=pet, blacklist=bl)
 
             if mon and self.running:
                 mx, my = mon
@@ -2011,16 +2752,16 @@ class BotApp:
                     # 定點：先按攻擊鍵 → 再點擊怪物+短拖曳
                     self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
                 elif mode == '遠程':
-                    press_key(self.var_rng_key.get())
+                    self._click_hotbar(cx, cy, cw, ch, self.var_rng_key.get(), clicks=2)
                 elif mode == '召喚':
-                    press_key(self.var_sum_atk.get())
+                    self._click_hotbar(cx, cy, cw, ch, self.var_sum_atk.get(), clicks=2)
 
                 time.sleep(0.2)
 
                 # ── 啟動預掃描（戰鬥中同時找下一隻怪） ──
                 pre_scanner.start(cx, cy, cw, ch, hwnd, exclude=(mx, my))
 
-                # ── 戰鬥等待（雙重偵測：HP條+游標，30ms級反應） ──
+                # ── 戰鬥等待 ──
                 self._set_state(BotState.ATTACKING)
                 combat_start = time.time()
                 stuck_time = self.var_stuck.get()
@@ -2042,37 +2783,54 @@ class BotApp:
                             return
                         last_surv = now
 
-                    # 技能施放（每 1 秒）
-                    if now - last_skill > 1.0:
-                        self._combat_skill()
+                    # 技能施放（每 1 秒，近戰/地監不需要）
+                    if mode not in ('近戰', '地監') and now - last_skill > 1.0:
+                        self._combat_skill(cx, cy, cw, ch)
                         last_skill = now
 
-                    # 死亡偵測方法1：怪物頭上 HP 條消失
-                    if not detect_monster_hp_bar(cx, cy, cw, ch, mx, my):
-                        hp_bar_gone_count += 1
-                        if hp_bar_gone_count >= 2:
-                            killed = True
-                            break
+                    if mode in ('近戰', '地監'):
+                        # ── 近戰/地監：按住不放，偵測怪物死亡 ──
+                        # HP 條消失偵測
+                        if not detect_monster_hp_bar(cx, cy, cw, ch, mx, my):
+                            hp_bar_gone_count += 1
+                            if hp_bar_gone_count >= 2:
+                                killed = True
+                                break
+                        else:
+                            hp_bar_gone_count = 0
+                        time.sleep(0.2)
                     else:
-                        hp_bar_gone_count = 0
+                        # ── 遠程/定點/其他：原有邏輯 ──
+                        # 死亡偵測方法1：怪物頭上 HP 條消失
+                        if not detect_monster_hp_bar(cx, cy, cw, ch, mx, my):
+                            hp_bar_gone_count += 1
+                            if hp_bar_gone_count >= 2:
+                                killed = True
+                                break
+                        else:
+                            hp_bar_gone_count = 0
 
-                    # 死亡偵測方法2：游標不再是劍（備用）
-                    move_exact(mx, my)
-                    time.sleep(0.05)
-                    if get_cursor() == CURSOR_FINGER:
-                        time.sleep(0.1)
+                        # 死亡偵測方法2：游標不再是劍
                         move_exact(mx, my)
                         time.sleep(0.05)
                         if get_cursor() == CURSOR_FINGER:
-                            killed = True
-                            break
+                            time.sleep(0.1)
+                            move_exact(mx, my)
+                            time.sleep(0.05)
+                            if get_cursor() == CURSOR_FINGER:
+                                killed = True
+                                break
 
-                    # 重新攻擊（每 4 秒確保命中）
-                    if now - combat_start > 4 * (retry_attack + 1):
-                        retry_attack += 1
-                        self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
+                        # 重新攻擊（每 4 秒確保命中）
+                        if now - combat_start > 4 * (retry_attack + 1):
+                            retry_attack += 1
+                            self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
 
-                    time.sleep(0.15 + random.uniform(0, 0.05))
+                        time.sleep(0.15 + random.uniform(0, 0.05))
+
+                # 近戰/地監：戰鬥結束放開滑鼠
+                if mode in ('近戰', '地監'):
+                    game_up()
 
                 # 停止預掃描，取得結果
                 pre_scanner.stop()
@@ -2087,14 +2845,44 @@ class BotApp:
 
                     # 定點模式不回定點（角色本來就不動）
 
-                    # 快速撿物（定點模式不撿）
+                    # 快速撿物
                     if self.var_loot.get() and mode not in ('定點','純定點','墮落之地') and self.running:
-                        for _ in range(2):
-                            if not scan_loot(cx, cy, cw, ch, hwnd):
-                                break
+                        if mode in ('近戰', '地監'):
+                            # 近戰/地監：怪死後按 F4 拾取 + 掃描撿物
+                            ctypes.windll.user32.SetForegroundWindow(hwnd)
+                            try:
+                                interception.press('f4', presses=5, interval=0.1)
+                            except:
+                                for _ in range(5):
+                                    press_key('F4')
+                                    time.sleep(0.1)
+                            time.sleep(0.2)
+                            # 再掃描附近掉落物點擊拾取
+                            for _ in range(3):
+                                if not scan_loot(cx, cy, cw, ch, hwnd):
+                                    break
+                                self.loots += 1
+                                time.sleep(0.15)
                             self.loots += 1
-                            time.sleep(0.1)
+                        else:
+                            for _ in range(2):
+                                if not scan_loot(cx, cy, cw, ch, hwnd):
+                                    break
+                                self.loots += 1
+                                time.sleep(0.1)
                         self._stats()
+
+                    # ── 自動回城販賣（每 N 次擊殺檢查） ──
+                    if self.var_autosell_en.get() and self.kills % 20 == 0 and self.kills > 0:
+                        # 簡易背包滿度估算：每 20 殺檢查，用擊殺數估算
+                        est_full = min(95, self.kills * 2)  # 粗估
+                        if est_full >= self.var_autosell_full.get():
+                            self.log(f"背包估計 {est_full}% 滿，回城販賣")
+                            self._click_hotbar(cx, cy, cw, ch, self.var_autosell_recall.get(), clicks=2)
+                            self._status("回城販賣", '#f5a623')
+                            alert('sell')
+                            self.running = False
+                            break
 
                     # ── 零延遲轉移：有預掃描結果就直接打 ──
                     if next_mon and self.running:
@@ -2114,6 +2902,19 @@ class BotApp:
                 # ── 沒找到怪物 ──
                 no_monster_count += 1
 
+                # 幀差分偵測遠處移動目標（掃描找不到時的補充）
+                if no_monster_count >= 2 and self.running:
+                    far_targets = _frame_differ.detect_movement(cx, cy, cw, ch)
+                    if far_targets:
+                        fx, fy = far_targets[0]
+                        self.log(f"幀差分→移動目標({fx},{fy})")
+                        smooth_move(fx, fy)
+                        human_sleep(0.1)
+                        if get_cursor() != CURSOR_FINGER:
+                            self._do_attack(fx, fy, cx, cy, cw, ch, hwnd)
+                            no_monster_count = 0
+                            continue
+
                 if self.running and self.var_roam.get() and mode not in ('定點','純定點','墮落之地'):
                     # 用小地圖檢查偏移
                     drift = self._check_drift(cx, cy, cw, ch)
@@ -2122,6 +2923,16 @@ class BotApp:
                         self._status(f"回定點", '#f5a623')
                         self.log(f"偏離定點({drift:.2f})，走回去")
                         self._walk_back_to_anchor(cx, cy, cw, ch, hwnd)
+                        no_monster_count = 0
+                    elif no_monster_count > 8:
+                        # useless 計數器防卡死：連續找不到怪，隨機大距離移動脫困
+                        self._status("脫困", '#f5a623')
+                        self.log(f"連續{no_monster_count}次找不到怪，脫困移動")
+                        dist = self.var_roam_dist.get() * 2
+                        r = roam(cx, cy, cw, ch, hwnd, dist)
+                        if r:
+                            mx, my = r
+                            self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
                         no_monster_count = 0
                     else:
                         # 正常漫遊
@@ -2134,12 +2945,15 @@ class BotApp:
                             self._do_attack(mx, my, cx, cy, cw, ch, hwnd)
                             no_monster_count = 0
                 elif self.running:
-                    time.sleep(1 + random.uniform(0, 0.5))
+                    human_sleep(1.0)
           except Exception as e:
+            import traceback
             self.log(f"[錯誤] {e} — 自動恢復")
+            self.log(traceback.format_exc()[:200])
             time.sleep(1)
             continue
 
     def run(self):self.log("就緒");self.root.mainloop()
 
-if __name__=="__main__":BotApp().run()
+if __name__=="__main__":
+    BotApp().run()
