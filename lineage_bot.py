@@ -481,22 +481,101 @@ class BarReader:
         except:
             return None
 
+    def _auto_find_bars(self, cx, cy, cw, ch):
+        """自動搜尋 HP/MP 條位置（不需要校準檔）
+        天堂的 HP/MP 條在畫面底部 UI 區域，紅色=HP，藍色=MP
+        """
+        if getattr(self, '_auto_found', False):
+            return
+        try:
+            # 截取底部 30% 區域
+            bottom_y = int(ch * 0.70)
+            bottom_h = ch - bottom_y
+            frame = grab_region(cx, cy + bottom_y, cw, bottom_h)
+            if frame is None or frame.size == 0:
+                return
+
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            h_ch, s_ch, v_ch = hsv[:,:,0], hsv[:,:,1], hsv[:,:,2]
+
+            # 找紅色橫條（HP）：H=0-10 or 170-180, S>80, V>80
+            red_mask = (((h_ch < 10) | (h_ch > 170)) & (s_ch > 80) & (v_ch > 80)).astype(np.uint8)
+
+            # 找最長的紅色橫條
+            best_hp_y = None
+            best_hp_len = 0
+            best_hp_x1 = 0
+            best_hp_x2 = 0
+            for row_y in range(frame.shape[0]):
+                red_cols = np.where(red_mask[row_y] > 0)[0]
+                if len(red_cols) < 20:
+                    continue
+                # 找最長連續段
+                x1, x2 = red_cols[0], red_cols[-1]
+                run_len = x2 - x1
+                if run_len > best_hp_len and run_len < cw * 0.5:  # 不超過半個螢幕寬
+                    best_hp_len = run_len
+                    best_hp_y = row_y
+                    best_hp_x1 = x1
+                    best_hp_x2 = x2
+
+            if best_hp_y is not None and best_hp_len > 20:
+                # 轉換為全視窗比例
+                abs_y = (bottom_y + best_hp_y) / ch
+                x1_pct = best_hp_x1 / cw
+                x2_pct = best_hp_x2 / cw
+                self._pixel_hp_bar = (x1_pct, x2_pct, abs_y)
+
+            # 找藍色橫條（MP）：H=100-130, S>50, V>50
+            blue_mask = ((h_ch > 100) & (h_ch < 130) & (s_ch > 50) & (v_ch > 50)).astype(np.uint8)
+            best_mp_y = None
+            best_mp_len = 0
+            best_mp_x1 = 0
+            best_mp_x2 = 0
+            for row_y in range(frame.shape[0]):
+                blue_cols = np.where(blue_mask[row_y] > 0)[0]
+                if len(blue_cols) < 20:
+                    continue
+                x1, x2 = blue_cols[0], blue_cols[-1]
+                run_len = x2 - x1
+                if run_len > best_mp_len and run_len < cw * 0.5:
+                    best_mp_len = run_len
+                    best_mp_y = row_y
+                    best_mp_x1 = x1
+                    best_mp_x2 = x2
+
+            if best_mp_y is not None and best_mp_len > 20:
+                abs_y = (bottom_y + best_mp_y) / ch
+                x1_pct = best_mp_x1 / cw
+                x2_pct = best_mp_x2 / cw
+                self._pixel_mp_bar = (x1_pct, x2_pct, abs_y)
+
+            self._auto_found = (self._pixel_hp_bar is not None)
+        except:
+            pass
+
     def hp(self, sct, cx, cy, cw, ch):
-        # 優先用像素偵測（如果有校準檔）
+        # 1. 嘗試載入校準檔
         if not hasattr(self, '_pixel_hp_bar'):
             self._load_pixel_config()
+        # 2. 沒校準檔就自動搜尋
+        if not self._pixel_hp_bar:
+            self._auto_find_bars(cx, cy, cw, ch)
+        # 3. 像素偵測
         if self._pixel_hp_bar:
             val = self._read_pixel_bar(cx, cy, cw, ch, self._pixel_hp_bar, 'hp')
             if val is not None:
                 self._hp_ratio = val
                 return val
-        # Fallback: OCR
+        # 4. Fallback: OCR
         self._update(cx, cy, cw, ch)
         return self._hp_ratio
 
     def mp(self, sct, cx, cy, cw, ch):
         if not hasattr(self, '_pixel_mp_bar'):
             self._load_pixel_config()
+        if not self._pixel_mp_bar:
+            self._auto_find_bars(cx, cy, cw, ch)
         if self._pixel_mp_bar:
             val = self._read_pixel_bar(cx, cy, cw, ch, self._pixel_mp_bar, 'mp')
             if val is not None:
@@ -506,9 +585,11 @@ class BarReader:
 
     def calibrate(self, sct, cx, cy, cw, ch):
         self._load_pixel_config()
+        if not self._pixel_hp_bar:
+            self._auto_find_bars(cx, cy, cw, ch)
         self._last_ocr = 0
         self._ocr_busy = False
-        self._bg_ocr(cx, cy, cw, ch)  # 校準時同步跑
+        self._bg_ocr(cx, cy, cw, ch)
         return self._hp_ratio >= 0
 
 bars = BarReader()
@@ -2574,6 +2655,22 @@ class BotApp:
         # 自動偵測輸入模式
         _detect_input_mode(g[0])
         self.log(f"輸入模式: {INPUT_MODE}")
+
+        # 自動校準 HP/MP 條位置
+        cx0, cy0, cw0, ch0 = get_rect(g[0])
+        bars._auto_found = False
+        bars._pixel_hp_bar = None
+        bars._pixel_mp_bar = None
+        bars._load_pixel_config()
+        if not bars._pixel_hp_bar:
+            self.log("自動搜尋 HP/MP 條位置...")
+            bars._auto_find_bars(cx0, cy0, cw0, ch0)
+        if bars._pixel_hp_bar:
+            self.log(f"HP條位置: Y={bars._pixel_hp_bar[2]:.3f} X={bars._pixel_hp_bar[0]:.3f}-{bars._pixel_hp_bar[1]:.3f}")
+        else:
+            self.log("⚠ 未找到HP條！將使用定時喝水模式")
+        if bars._pixel_mp_bar:
+            self.log(f"MP條位置: Y={bars._pixel_mp_bar[2]:.3f} X={bars._pixel_mp_bar[0]:.3f}-{bars._pixel_mp_bar[1]:.3f}")
 
         # 自動偵測手指游標 handle（純定點模式不需要）
         global CURSOR_FINGER
