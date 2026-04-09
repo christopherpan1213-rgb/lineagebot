@@ -415,70 +415,57 @@ class BarReader:
             return False
 
     def _read_pixel_bar(self, cx, cy, cw, ch, bar_info, bar_type='hp'):
-        """用 HSV 色域 + 多行掃描讀取 HP/MP 條比例
-        改進：7 行掃描取中位數、HSV 偵測更強健、深灰色偵測損失部分
+        """讀取 HP/MP 條比例 — 簡單可靠版
+        原理：找紅/藍色填充的寬度，跟已知的滿血寬度比
         """
         if not bar_info:
             return None
         x1_pct, x2_pct, y_pct = bar_info
         y = int(ch * y_pct)
-        scan_left = int(cw * 0.15)
-        x_start = max(0, int(cw * x1_pct) - scan_left)
-        x_end = min(cw, int(cw * x2_pct) + int(cw * 0.05))
+        # 截取已知 HP 條的完整範圍（含左右邊界）
+        x_start = max(0, int(cw * x1_pct) - 5)
+        x_end = min(cw, int(cw * x2_pct) + 5)
         region_w = x_end - x_start
-        if region_w < 5:
+        if region_w < 10:
             return None
         try:
-            # 掃描 7 行（上下各 3 行），取中位數提高穩定性
-            frame = grab_region(cx + x_start, cy + y - 3, region_w, 7)
+            frame = grab_region(cx + x_start, cy + y - 2, region_w, 5)
             if frame is None or frame.size == 0:
                 return None
 
-            # 轉 HSV 色域（對光線變化更強健）
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            h, s, v = hsv[:,:,0].astype(int), hsv[:,:,1].astype(int), hsv[:,:,2].astype(int)
+            # 用 RGB 直接判斷（天堂 HP 條: R>80, G<80, B<60）
+            r = frame[:,:,2].astype(int)
+            g = frame[:,:,1].astype(int)
+            b = frame[:,:,0].astype(int)
 
             if bar_type == 'hp':
-                # HP 紅色：H=0-10 或 170-180, S>60, V>60
-                fill_mask = ((h < 10) | (h > 170)) & (s > 60) & (v > 60)
+                # 紅色填充：R > 80 且 R 比 G 和 B 大很多
+                fill_mask = (r > 80) & (r - g > 30) & (r - b > 40)
             else:
-                # MP 藍色：H=100-130, S>50, V>50
-                fill_mask = (h > 100) & (h < 130) & (s > 50) & (v > 50)
+                # 藍色填充：B > 80 且 B 比 R 大
+                fill_mask = (b > 80) & (b - r > 20)
 
-            # 深灰色 = HP 損失部分（天堂 HP 條損失的部分是深灰/黑色）
-            dark_mask = (v < 50) & (s < 40)
-
-            # 逐行計算比例，取中位數
-            ratios = []
+            # 逐行統計紅色像素數
+            fill_counts = []
             for row in range(frame.shape[0]):
                 fill_cols = np.where(fill_mask[row])[0]
-                dark_cols = np.where(dark_mask[row])[0]
-                if len(fill_cols) == 0 and len(dark_cols) == 0:
-                    continue
+                if len(fill_cols) > 5:  # 至少 5px 才算有效行
+                    fill_width = fill_cols[-1] - fill_cols[0] + 1
+                    fill_counts.append(fill_width)
 
-                if len(fill_cols) == 0:
-                    ratios.append(0.0)
-                    continue
+            if not fill_counts:
+                return 0.0  # 沒有紅色 = 0%
 
-                # 找填充區域的範圍
-                first_fill = fill_cols[0]
-                last_fill = fill_cols[-1]
-                fill_width = last_fill - first_fill + 1
+            # 填充寬度的中位數
+            fill_width = float(np.median(fill_counts))
 
-                # 找損失區域：填充區左邊的深灰像素
-                left_dark = dark_cols[dark_cols < first_fill]
-                dark_width = len(left_dark)
-
-                total = fill_width + dark_width
-                if total < 3:
-                    continue
-                ratios.append(fill_width / total)
-
-            if not ratios:
+            # 滿血寬度 = 已知的 HP 條完整寬度（從 auto_find 記錄）
+            full_width = int(cw * (x2_pct - x1_pct))
+            if full_width < 10:
                 return None
 
-            # 取中位數（排除異常值）
-            return float(np.median(ratios))
+            ratio = min(1.0, fill_width / full_width)
+            return ratio
         except:
             return None
 
@@ -499,14 +486,19 @@ class BarReader:
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             h_ch, s_ch, v_ch = hsv[:,:,0], hsv[:,:,1], hsv[:,:,2]
 
-            # 找紅色橫條（HP）：H=0-10 or 170-180, S>80, V>80
-            red_mask = (((h_ch < 10) | (h_ch > 170)) & (s_ch > 80) & (v_ch > 80)).astype(np.uint8)
+            # 找紅色橫條（HP）：R>80, R-G>30, R-B>40（用 RGB 更直接）
+            r_ch = frame[:,:,2].astype(int)
+            g_ch2 = frame[:,:,1].astype(int)
+            b_ch = frame[:,:,0].astype(int)
+            red_mask = ((r_ch > 80) & ((r_ch - g_ch2) > 30) & ((r_ch - b_ch) > 40)).astype(np.uint8)
 
             # 找最長的紅色橫條
             best_hp_y = None
             best_hp_len = 0
             best_hp_x1 = 0
             best_hp_x2 = 0
+            min_bar = int(cw * 0.05)   # HP 條至少 5% 寬
+            max_bar = int(cw * 0.25)   # HP 條最多 25% 寬
             for row_y in range(frame.shape[0]):
                 red_cols = np.where(red_mask[row_y] > 0)[0]
                 if len(red_cols) < 20:
@@ -514,7 +506,7 @@ class BarReader:
                 # 找最長連續段
                 x1, x2 = red_cols[0], red_cols[-1]
                 run_len = x2 - x1
-                if run_len > best_hp_len and run_len < cw * 0.5:  # 不超過半個螢幕寬
+                if run_len > best_hp_len and min_bar < run_len < max_bar:
                     best_hp_len = run_len
                     best_hp_y = row_y
                     best_hp_x1 = x1
@@ -527,8 +519,8 @@ class BarReader:
                 x2_pct = best_hp_x2 / cw
                 self._pixel_hp_bar = (x1_pct, x2_pct, abs_y)
 
-            # 找藍色橫條（MP）：H=100-130, S>50, V>50
-            blue_mask = ((h_ch > 100) & (h_ch < 130) & (s_ch > 50) & (v_ch > 50)).astype(np.uint8)
+            # 找藍色橫條（MP）：B>80, B-R>20
+            blue_mask = ((b_ch > 80) & ((b_ch - r_ch) > 20)).astype(np.uint8)
             best_mp_y = None
             best_mp_len = 0
             best_mp_x1 = 0
@@ -539,7 +531,7 @@ class BarReader:
                     continue
                 x1, x2 = blue_cols[0], blue_cols[-1]
                 run_len = x2 - x1
-                if run_len > best_mp_len and run_len < cw * 0.5:
+                if run_len > best_mp_len and min_bar < run_len < max_bar:
                     best_mp_len = run_len
                     best_mp_y = row_y
                     best_mp_x1 = x1
@@ -1559,8 +1551,9 @@ class BotApp:
         tk.Button(r,text="刪除",font=FONTS,bg=ACC,fg='white',
                   command=self._delete_profile).pack(side='left',padx=2)
 
-        # Debug
+        # Debug + 校準
         r=self._frame(p);r.pack(fill='x',padx=10,pady=2)
+        tk.Button(r,text="校準HP條",font=FONTS,bg='#e67e22',fg='white',command=self._calibrate_hp).pack(side='left',padx=3)
         tk.Button(r,text="HP偵測截圖",font=FONTS,bg='#8e44ad',fg='white',command=self._debug_hp).pack(side='left',padx=3)
 
         # 日誌
@@ -1602,6 +1595,99 @@ class BotApp:
         self.var_profile.set('')
         self._refresh_profiles()
         self.log(f"設定已刪除: {name}")
+
+    def _calibrate_hp(self):
+        """手動校準 HP/MP 條位置 — 使用者點擊兩下"""
+        from tkinter import messagebox
+        g = find_game()
+        if not g:
+            self.log("找不到遊戲視窗！")
+            return
+        cx, cy, cw, ch = get_rect(g[0])
+
+        messagebox.showinfo("校準 HP 條",
+            "接下來請在遊戲畫面中：\n\n"
+            "1. 點擊 HP 條的【左端】\n"
+            "2. 再點擊 HP 條的【右端】\n\n"
+            "（請確保 HP 是滿的）\n\n"
+            "按確定後開始，你有 10 秒鐘", parent=self.root)
+
+        self.log("校準中：請點擊 HP 條左端...")
+        self._status("校準HP：點左端", '#e67e22')
+
+        import ctypes.wintypes
+        clicks = []
+
+        def wait_click():
+            prev = False
+            start = time.time()
+            while time.time() - start < 10:
+                lmb = bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+                if lmb and not prev:
+                    pt = ctypes.wintypes.POINT()
+                    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                    return (pt.x, pt.y)
+                prev = lmb
+                time.sleep(0.02)
+            return None
+
+        # 等第一次點擊（HP 條左端）
+        p1 = wait_click()
+        if not p1:
+            self.log("校準超時")
+            return
+        self.log(f"HP左端: ({p1[0]},{p1[1]})")
+        self._status("校準HP：點右端", '#e67e22')
+        time.sleep(0.3)
+
+        # 等第二次點擊（HP 條右端）
+        p2 = wait_click()
+        if not p2:
+            self.log("校準超時")
+            return
+        self.log(f"HP右端: ({p2[0]},{p2[1]})")
+
+        # 計算比例並儲存
+        x1_pct = (p1[0] - cx) / cw
+        x2_pct = (p2[0] - cx) / cw
+        y_pct = ((p1[1] + p2[1]) / 2 - cy) / ch
+
+        bars._pixel_hp_bar = (x1_pct, x2_pct, y_pct)
+        bars._auto_found = True
+        bars._hp_ever_read = False
+
+        # 儲存到設定檔
+        cfg = {'hp_bar': [x1_pct, x2_pct, y_pct]}
+
+        # 問是否也校準 MP
+        if messagebox.askyesno("校準 MP 條", "要繼續校準 MP 條嗎？\n\n點擊 MP 條的左端和右端", parent=self.root):
+            self.log("校準中：請點擊 MP 條左端...")
+            self._status("校準MP：點左端", '#3498db')
+            p3 = wait_click()
+            if p3:
+                self.log(f"MP左端: ({p3[0]},{p3[1]})")
+                self._status("校準MP：點右端", '#3498db')
+                time.sleep(0.3)
+                p4 = wait_click()
+                if p4:
+                    self.log(f"MP右端: ({p4[0]},{p4[1]})")
+                    mx1 = (p3[0] - cx) / cw
+                    mx2 = (p4[0] - cx) / cw
+                    my = ((p3[1] + p4[1]) / 2 - cy) / ch
+                    bars._pixel_mp_bar = (mx1, mx2, my)
+                    cfg['mp_bar'] = [mx1, mx2, my]
+
+        # 存檔
+        cfg_path = os.path.join(SCRIPT_DIR, 'hp_config.json')
+        with open(cfg_path, 'w') as f:
+            json.dump(cfg, f, indent=2)
+
+        self.log(f"校準完成！HP={bars._pixel_hp_bar}")
+        self._status("校準完成", '#27ae60')
+
+        # 測試讀取
+        hp = bars.hp(None, cx, cy, cw, ch)
+        self.log(f"測試讀取 HP={hp*100:.0f}%" if hp >= 0 else "測試讀取失敗")
 
     def _debug_hp(self):
         """截圖並標記 HP/MP 條偵測位置，存到桌面"""
@@ -2870,7 +2956,7 @@ class BotApp:
 
             # 掃描+攻擊一體化（碰到怪物瞬間就打）
             self._set_state(BotState.SCANNING)
-            pet = self.var_pet_en.get() or mode == '地監'  # 地監模式強制過濾寵物
+            pet = self.var_pet_en.get() or mode in ('地監', '召喚')  # 帶寵物的模式強制過濾
             bl = getattr(self, 'monster_blacklist', [])
             mon = scan_and_attack(cx, cy, cw, ch, hwnd, self.log, mode=mode, pet_filter=pet, blacklist=bl)
 
