@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "16.7"
+BOT_VERSION = "17.1"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -1174,8 +1174,8 @@ def _is_party_slot_occupied(cx, cy, cw, ch, slot_index):
 # ═══════════════════════════════ 高寵輔助：隊友追蹤 ═══════════════════════════════
 
 def _find_teammate_bar(cx, cy, cw, ch):
-    """在遊戲場景中找隊友的玫瑰紅血條位置
-    隊友血條顏色：R>150, G=30-80, B=50-113（玫瑰紅，跟怪物/寵物的純紅不同）
+    """找隊友血條位置：找所有紅色血條 → 排除最靠近畫面中心的（自己）→ 最近的就是隊友
+    血條顏色：R>150, R-G>60, R-B>60（玫瑰紅 R=246 G=127 B=130）
     回傳 (x, y) 螢幕絕對座標，或 None
     """
     sh = int(ch * 0.75)
@@ -1188,35 +1188,51 @@ def _find_teammate_bar(cx, cy, cw, ch):
         g = frame[:,:,1].astype(int)
         b = frame[:,:,0].astype(int)
 
-        # 隊友血條：玫瑰紅（R>150, G=25-90, B=40-120, R-G>80）
-        # 跟怪物純紅（B<50）和寵物紅（B<80）區別在於 B 較高
-        mask = (r > 150) & (g > 25) & (g < 90) & (b > 40) & (b < 120) & ((r - g) > 80)
+        # 血條紅色（R>150, R-G>60, R-B>60）
+        mask = (r > 150) & ((r - g) > 60) & ((r - b) > 60)
 
-        # 找最長的橫條
-        best_y = None
-        best_len = 0
-        best_x1 = 0
-        best_x2 = 0
+        center_x = cw // 2
+        center_y = sh // 2
+
+        # 找所有紅色橫條（連續段）
+        bars = []
         for row_y in range(frame.shape[0]):
             cols = np.where(mask[row_y])[0]
-            if len(cols) < 20:
+            if len(cols) < 12:
                 continue
-            x1, x2 = cols[0], cols[-1]
-            run = x2 - x1
-            # 血條寬度在 80-200px 之間
-            if run > best_len and 80 < run < 200:
-                best_len = run
-                best_y = row_y
-                best_x1 = x1
-                best_x2 = x2
+            # 找連續段
+            gaps = np.diff(cols)
+            segments = np.split(cols, np.where(gaps > 3)[0] + 1)
+            for seg in segments:
+                if len(seg) < 12:
+                    continue
+                x1, x2 = int(seg[0]), int(seg[-1])
+                run = x2 - x1
+                if 25 < run < 150:
+                    mid_x = (x1 + x2) // 2
+                    dist = math.sqrt((mid_x - center_x)**2 + (row_y - center_y)**2)
+                    # 避免重複（相鄰行同一條）
+                    if not bars or abs(row_y - bars[-1][0]) > 5 or abs(mid_x - bars[-1][1]) > 50:
+                        bars.append((row_y, mid_x, x1, x2, dist))
 
-        if best_y is not None:
-            # 回傳血條中心的螢幕絕對座標
-            abs_x = cx + (best_x1 + best_x2) // 2
-            abs_y = cy + best_y
-            return (abs_x, abs_y)
+        if not bars:
+            return None
 
-        return None
+        # 按距離中心排序
+        bars.sort(key=lambda b: b[4])
+
+        if len(bars) == 1:
+            # 只有一條血條，可能是隊友（自己血條可能太小沒偵測到）
+            row_y, mid_x, x1, x2, dist = bars[0]
+            # 如果離中心很近（<80px），可能是自己，回傳 None
+            if dist < 80:
+                return None
+            return (int(cx + mid_x), int(cy + row_y))
+        else:
+            # 多條血條：排除最靠近中心的（自己），回傳第二近的（隊友）
+            row_y, mid_x, x1, x2, dist = bars[1]
+            return (int(cx + mid_x), int(cy + row_y))
+
     except:
         return None
 
@@ -2630,8 +2646,10 @@ class BotApp:
                 if mp >= 0:
                     self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max, bar_type='mp')
 
-                # HP 急降即時反應
-                if hp >= 0 and prev_hp >= 0 and prev_hp - hp > 0.20 and self.var_hp_en.get():
+                # HP 急降即時反應（高寵/補血機跳過，100%→0%是誤判也跳過）
+                mode_now = self.var_mode.get()
+                if hp >= 0 and prev_hp >= 0 and prev_hp - hp > 0.20 and hp > 0.01 \
+                   and self.var_hp_en.get() and mode_now not in ('高寵輔助', '補血機'):
                     self.log(f"HP急降！{prev_hp*100:.0f}%→{hp*100:.0f}%")
                     k = self.var_hp_key.get()
                     self._click_hotbar(cx, cy, cw, ch, k)
@@ -3098,39 +3116,44 @@ class BotApp:
             if self.var_mode.get() == '高寵輔助':
                 now_hp = time.time()
 
-                # 1. 自動跟隨隊友（偵測畫面中的玫瑰紅血條）
+                # 1. 自動跟隨隊友（找畫面中非中心的血條）
                 follow_timer = timers.get('hpet_follow', 0)
                 if self.var_hpet_follow.get() and now_hp - follow_timer > self.var_hpet_follow_sec.get():
                     teammate_pos = _find_teammate_bar(cx, cy, cw, ch)
                     if teammate_pos:
                         tx, ty = teammate_pos
-                        # 計算角色中心
                         sh_s = int(ch * 0.75)
                         my_x = cx + cw // 2
                         my_y = cy + sh_s // 2
-                        # 距離太遠才跟隨（避免原地抖動）
                         dist = math.sqrt((tx - my_x)**2 + (ty - my_y)**2)
-                        if dist > 80:
-                            # 點擊隊友血條下方的地面跟過去
-                            click_y = min(ty + 50, cy + sh_s - 20)
+                        if dist > 150:
+                            # 點擊隊友血條下方的地面
+                            click_y = min(ty + 40, cy + sh_s - 20)
                             ctypes.windll.user32.SetForegroundWindow(hwnd)
-                            game_click(tx, click_y)
+                            game_click(int(tx), int(click_y))
                             self._status(f"跟隨中 距離{dist:.0f}", '#27ae60')
-                            self.log(f"跟隨隊友 ({tx},{ty}) 距離{dist:.0f}")
                         else:
                             self._status("高寵待命", '#27ae60')
                     else:
-                        self._status("找不到隊友", '#f5a623')
+                        self._status("找不到隊友血條", '#f5a623')
                     timers['hpet_follow'] = now_hp
 
                 # 2. 補血（偵測左下隊伍 UI，每 0.8 秒檢查）
                 heal_timer = timers.get('hpet_heal', 0)
                 if now_hp - heal_timer > 0.8:
                     thr = self.var_hpet_heal_thr.get() / 100
+                    found_any = False
                     for slot in range(1, 8):  # slot 0 是自己
-                        if not _is_party_slot_occupied(cx, cy, cw, ch, slot):
+                        occupied = _is_party_slot_occupied(cx, cy, cw, ch, slot)
+                        if not occupied:
                             continue
+                        found_any = True
                         hp_ratio = _read_party_hp(cx, cy, cw, ch, slot)
+                        # 每 3 秒顯示隊友 HP 讀值
+                        if not hasattr(self, '_last_party_debug') or now_hp - self._last_party_debug > 3:
+                            pos_info = _get_party_slot_pos(cx, cy, cw, ch, slot)
+                            self.log(f"隊友slot{slot} HP={hp_ratio*100:.0f}% 位置({pos_info['name'][0]},{pos_info['name'][1]})" if hp_ratio >= 0 else f"隊友slot{slot} 讀取失敗")
+                            self._last_party_debug = now_hp
                         if hp_ratio < 0:
                             continue
                         if hp_ratio < thr:
@@ -3143,6 +3166,9 @@ class BotApp:
                             self.heals += 1
                             self.log(f"高寵補血 slot{slot} HP={hp_ratio*100:.0f}%")
                             break
+                    if not found_any and (not hasattr(self, '_last_nofound') or now_hp - self._last_nofound > 10):
+                        self.log("找不到隊友（左下隊伍UI無人）")
+                        self._last_nofound = now_hp
                     timers['hpet_heal'] = now_hp
 
                 # 3. 上 Buff（定時對隊友施放）
