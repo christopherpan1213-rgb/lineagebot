@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "16.3"
+BOT_VERSION = "16.5"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -2652,13 +2652,17 @@ class BotApp:
             self.buffs += 1
             self.log(f"喝綠水({k})")
 
-        # 死亡（僅在 HP 成功讀取時判定）
+        # 死亡（HP 連續 3 次讀到 0 才判定，避免誤判）
         if hp >= 0 and hp <= 0.01:
-            self.log("角色死亡！")
-            alert('death')
-            self.running = False
-            self._status("死亡！", ACC)
-            return hp, mp
+            self._death_count = getattr(self, '_death_count', 0) + 1
+            if self._death_count >= 3:
+                self.log("角色死亡！（連續3次HP=0）")
+                alert('death')
+                self.running = False
+                self._status("死亡！", ACC)
+                return hp, mp
+        else:
+            self._death_count = 0
 
         # 緊急回城（最高優先，僅在 HP 成功讀取時觸發）
         if self.var_recall_en.get() and hp >= 0 and hp < self.var_recall_thr.get() / 100:
@@ -2993,8 +2997,9 @@ class BotApp:
             g = find_game()
             if not g:
                 dcc += 1
-                if self.var_dc_detect.get() and dcc >= 3:
-                    self.log("斷線！")
+                self.log(f"找不到視窗 ({dcc}/10)")
+                if self.var_dc_detect.get() and dcc >= 10:
+                    self.log("斷線！連續10次找不到視窗")
                     alert('dc')
                     self.running = False
                     self._status("斷線！", ACC)
@@ -3367,4 +3372,16 @@ class BotApp:
     def run(self):self.log("就緒");self.root.mainloop()
 
 if __name__=="__main__":
-    BotApp().run()
+    try:
+        BotApp().run()
+    except Exception as e:
+        import traceback
+        # 寫錯誤到檔案，方便除錯
+        try:
+            with open(os.path.join(SCRIPT_DIR, 'crash_log.txt'), 'w', encoding='utf-8') as f:
+                f.write(f"崩潰時間: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"錯誤: {e}\n\n")
+                f.write(traceback.format_exc())
+        except:
+            pass
+        raise
