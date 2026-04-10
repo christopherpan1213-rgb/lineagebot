@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "15.0"
+BOT_VERSION = "16.3"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
