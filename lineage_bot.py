@@ -1106,13 +1106,14 @@ def _get_party_slot_pos(cx, cy, cw, ch, slot_index):
     """取得隊伍 UI 中第 N 個成員的名字點擊座標和 HP 條座標
     slot_index: 0-7（最多 8 人）
     佈局：2 列 4 行，slot 0-1 在第一行，2-3 在第二行...
+    基於全螢幕遊戲的精確像素分析（v16.0）
     """
-    # 隊伍 UI 起始位置（比例）
-    ui_x = cx + int(cw * 0.150)  # 左邊界
-    ui_y = cy + int(ch * 0.793)  # 名字行 Y
-    slot_w = int(cw * 0.058)     # 格子寬度
-    row_h = int(ch * 0.040)      # 行高（名字+HP+間距）
-    hp_offset_y = int(ch * 0.012)  # HP 條在名字下方
+    # 隊伍 UI 起始位置（比例，基於遊戲客戶端區域）
+    ui_x = cx + int(cw * 0.009)   # 左邊界（蛇姬格子左端）
+    ui_y = cy + int(ch * 0.782)   # 名字行 Y
+    slot_w = int(cw * 0.078)      # 每格寬度
+    row_h = int(ch * 0.038)       # 行高（名字+HP+間距）
+    hp_offset_y = int(ch * 0.020) # HP 條在名字下方
 
     col = slot_index % 2   # 0=左, 1=右
     row = slot_index // 2  # 0-3
@@ -1460,7 +1461,7 @@ class BotApp:
         self.var_hpet_buff_en=[tk.BooleanVar(value=False) for _ in range(3)]
         self.var_hpet_buff_key=[tk.StringVar(value='F8') for _ in range(3)]
         self.var_hpet_buff_sec=[tk.IntVar(value=300) for _ in range(3)]
-        self.var_hpet_follow_sec=tk.DoubleVar(value=3.0)  # 跟隨檢查間隔
+        self.var_hpet_follow_sec=tk.DoubleVar(value=1.5)  # 跟隨檢查間隔
 
         # 遠程
         self.var_rng_key=tk.StringVar(value='F1')
@@ -3049,9 +3050,9 @@ class BotApp:
                         self._status("找不到隊友", '#f5a623')
                     timers['hpet_follow'] = now_hp
 
-                # 2. 補血（偵測左下隊伍 UI）
+                # 2. 補血（偵測左下隊伍 UI，每 0.8 秒檢查）
                 heal_timer = timers.get('hpet_heal', 0)
-                if now_hp - heal_timer > 2:
+                if now_hp - heal_timer > 0.8:
                     thr = self.var_hpet_heal_thr.get() / 100
                     for slot in range(1, 8):  # slot 0 是自己
                         if not _is_party_slot_occupied(cx, cy, cw, ch, slot):
@@ -3092,7 +3093,7 @@ class BotApp:
                         self.log(f"高寵Buff{i+1}({self.var_hpet_buff_key[i].get()})")
 
                 self._stats()
-                time.sleep(0.3)
+                time.sleep(0.1)
                 continue  # 高寵不打怪
 
             # ── 自動練功循環 ──
