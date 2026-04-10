@@ -1331,18 +1331,27 @@ def list_profiles():
             profiles.append(f[:-5])  # 去掉 .json
     return profiles
 
+def _collect_all_vars(gui):
+    """收集所有 var_ 設定值（支援 list 型態的 BooleanVar/IntVar 等）"""
+    c = {}
+    for a in dir(gui):
+        if not a.startswith('var_'):
+            continue
+        v = getattr(gui, a)
+        if isinstance(v, (tk.BooleanVar, tk.StringVar, tk.IntVar, tk.DoubleVar)):
+            c[a] = v.get()
+        elif isinstance(v, list) and v:
+            if isinstance(v[0], (tk.BooleanVar, tk.StringVar, tk.IntVar, tk.DoubleVar)):
+                c[a] = [x.get() for x in v]
+    c['monster_blacklist'] = gui.monster_blacklist
+    return c
+
 def save_profile(gui, name):
     """儲存目前設定到指定名稱的設定檔"""
-    c={}
-    for a in dir(gui):
-        if a.startswith('var_'):
-            v=getattr(gui,a)
-            if isinstance(v,(tk.BooleanVar,tk.StringVar,tk.IntVar,tk.DoubleVar)):c[a]=v.get()
-            elif isinstance(v,list) and v and isinstance(v[0],(tk.StringVar,tk.DoubleVar)):
-                c[a]=[x.get() for x in v]
-    c['monster_blacklist']=gui.monster_blacklist
+    c = _collect_all_vars(gui)
     fp = os.path.join(PROFILES_DIR, f"{name}.json")
-    with open(fp,'w') as f:json.dump(c,f,indent=2,ensure_ascii=False)
+    with open(fp, 'w') as f:
+        json.dump(c, f, indent=2, ensure_ascii=False)
 
 def load_profile(gui, name):
     """從指定名稱的設定檔載入設定"""
@@ -1354,6 +1363,24 @@ def delete_profile(name):
     fp = os.path.join(PROFILES_DIR, f"{name}.json")
     if os.path.exists(fp):
         os.remove(fp)
+
+def autosave(gui):
+    """自動儲存到 _autosave.json"""
+    try:
+        c = _collect_all_vars(gui)
+        fp = os.path.join(PROFILES_DIR, '_autosave.json')
+        with open(fp, 'w') as f:
+            json.dump(c, f, indent=2, ensure_ascii=False)
+    except:
+        pass
+
+def autoload(gui):
+    """啟動時自動載入上次的設定"""
+    fp = os.path.join(PROFILES_DIR, '_autosave.json')
+    if os.path.exists(fp):
+        _apply_cfg(gui, fp)
+        return True
+    return False
 
 # ═══════════════════════════════ 回城補給方案 ═══════════════════════════════
 
@@ -1491,6 +1518,9 @@ class BotApp:
 
         self._build()
         load_cfg(self)
+        # 自動載入上次的設定檔
+        if autoload(self):
+            self.log("已載入上次設定")
         self._bind_hotkey()
 
     def _bind_hotkey(self):
@@ -1506,6 +1536,7 @@ class BotApp:
             keyboard.add_hotkey(key, lambda: self.root.after(0, self._toggle))
 
     def _close(self):
+        autosave(self)  # 關閉時自動儲存所有設定
         save_cfg(self);self.running=False;self.root.destroy()
 
     def _build(self):
@@ -2365,7 +2396,7 @@ class BotApp:
 
     def _toggle(self):
         if self.running:
-            self.running=False;self._status("已停止");self.log("Bot 暫停");save_cfg(self)
+            self.running=False;self._status("已停止");self.log("Bot 暫停");save_cfg(self);autosave(self)
         else:
             self.running=True;self.t0=time.time();self.bot_state=BotState.IDLE;self._status("運行中",'#27ae60');self.log("Bot 啟動")
             self._last_activity = time.time()
