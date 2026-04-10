@@ -415,56 +415,58 @@ class BarReader:
             return False
 
     def _read_pixel_bar(self, cx, cy, cw, ch, bar_info, bar_type='hp'):
-        """讀取 HP/MP 條比例 — 簡單可靠版
-        原理：找紅/藍色填充的寬度，跟已知的滿血寬度比
+        """讀取 HP/MP 條比例 — 用紅色像素總數 / 滿血像素總數
+        校準時記錄的是滿血時的位置，所以滿血時的紅色像素數就是 100%
         """
         if not bar_info:
             return None
         x1_pct, x2_pct, y_pct = bar_info
         y = int(ch * y_pct)
-        # 截取已知 HP 條的完整範圍（含左右邊界）
-        x_start = max(0, int(cw * x1_pct) - 5)
-        x_end = min(cw, int(cw * x2_pct) + 5)
+        x_start = max(0, int(cw * x1_pct))
+        x_end = min(cw, int(cw * x2_pct))
         region_w = x_end - x_start
         if region_w < 10:
             return None
         try:
+            # 截取 HP 條區域（上下各 2px）
             frame = grab_region(cx + x_start, cy + y - 2, region_w, 5)
             if frame is None or frame.size == 0:
                 return None
 
-            # 用 RGB 直接判斷（天堂 HP 條: R>80, G<80, B<60）
             r = frame[:,:,2].astype(int)
             g = frame[:,:,1].astype(int)
             b = frame[:,:,0].astype(int)
 
             if bar_type == 'hp':
-                # 紅色填充：R > 80 且 R 比 G 和 B 大很多
-                fill_mask = (r > 80) & (r - g > 30) & (r - b > 40)
+                # 紅色：R>80 且 R 明顯大於 G 和 B
+                fill_mask = (r > 80) & ((r - g) > 20) & ((r - b) > 30)
             else:
-                # 藍色填充：B > 80 且 B 比 R 大
-                fill_mask = (b > 80) & (b - r > 20)
+                # 藍色：B>80 且 B 明顯大於 R
+                fill_mask = (b > 80) & ((b - r) > 15)
 
-            # 逐行統計紅色像素數
-            fill_counts = []
+            # 每行紅色像素佔比
+            ratios = []
             for row in range(frame.shape[0]):
-                fill_cols = np.where(fill_mask[row])[0]
-                if len(fill_cols) > 5:  # 至少 5px 才算有效行
-                    fill_width = fill_cols[-1] - fill_cols[0] + 1
-                    fill_counts.append(fill_width)
+                count = fill_mask[row].sum()
+                if count > 3:  # 有效行
+                    ratios.append(count / region_w)
 
-            if not fill_counts:
-                return 0.0  # 沒有紅色 = 0%
+            if not ratios:
+                return 0.0
 
-            # 填充寬度的中位數
-            fill_width = float(np.median(fill_counts))
+            # 取中位數
+            ratio = float(np.median(ratios))
 
-            # 滿血寬度 = 已知的 HP 條完整寬度（從 auto_find 記錄）
-            full_width = int(cw * (x2_pct - x1_pct))
-            if full_width < 10:
-                return None
+            # 記錄滿血時的最大比例（第一次讀到的最大值就是 100%）
+            max_key = f'_max_{bar_type}'
+            prev_max = getattr(self, max_key, 0)
+            if ratio > prev_max:
+                setattr(self, max_key, ratio)
+            max_ratio = getattr(self, max_key, ratio)
 
-            ratio = min(1.0, fill_width / full_width)
+            # 歸一化：當前比例 / 最大比例
+            if max_ratio > 0.01:
+                return min(1.0, ratio / max_ratio)
             return ratio
         except:
             return None
@@ -1167,6 +1169,55 @@ def _is_party_slot_occupied(cx, cy, cw, ch, slot_index):
     except:
         return False
 
+# ═══════════════════════════════ 高寵輔助：隊友追蹤 ═══════════════════════════════
+
+def _find_teammate_bar(cx, cy, cw, ch):
+    """在遊戲場景中找隊友的玫瑰紅血條位置
+    隊友血條顏色：R>150, G=30-80, B=50-113（玫瑰紅，跟怪物/寵物的純紅不同）
+    回傳 (x, y) 螢幕絕對座標，或 None
+    """
+    sh = int(ch * 0.75)
+    try:
+        frame = grab_region(cx, cy, cw, sh)
+        if frame is None or frame.size == 0:
+            return None
+
+        r = frame[:,:,2].astype(int)
+        g = frame[:,:,1].astype(int)
+        b = frame[:,:,0].astype(int)
+
+        # 隊友血條：玫瑰紅（R>150, G=25-90, B=40-120, R-G>80）
+        # 跟怪物純紅（B<50）和寵物紅（B<80）區別在於 B 較高
+        mask = (r > 150) & (g > 25) & (g < 90) & (b > 40) & (b < 120) & ((r - g) > 80)
+
+        # 找最長的橫條
+        best_y = None
+        best_len = 0
+        best_x1 = 0
+        best_x2 = 0
+        for row_y in range(frame.shape[0]):
+            cols = np.where(mask[row_y])[0]
+            if len(cols) < 20:
+                continue
+            x1, x2 = cols[0], cols[-1]
+            run = x2 - x1
+            # 血條寬度在 80-200px 之間
+            if run > best_len and 80 < run < 200:
+                best_len = run
+                best_y = row_y
+                best_x1 = x1
+                best_x2 = x2
+
+        if best_y is not None:
+            # 回傳血條中心的螢幕絕對座標
+            abs_x = cx + (best_x1 + best_x2) // 2
+            abs_y = cy + best_y
+            return (abs_x, abs_y)
+
+        return None
+    except:
+        return None
+
 def scan_loot(cx, cy, cw, ch, hwnd):
     sh = int(ch * 0.75)
     ccx, ccy = cx + cw // 2, cy + sh // 2
@@ -1402,6 +1453,15 @@ class BotApp:
         self.var_autosell_full=tk.IntVar(value=80)      # 背包滿度%觸發
         self.var_autosell_recall=tk.StringVar(value='F12')  # 回城卷快捷鍵
 
+        # 高寵輔助模式
+        self.var_hpet_follow=tk.BooleanVar(value=True)   # 自動跟隨隊友
+        self.var_hpet_heal_key=tk.StringVar(value='F7')   # 治癒術快捷鍵
+        self.var_hpet_heal_thr=tk.IntVar(value=70)        # HP 低於%補血
+        self.var_hpet_buff_en=[tk.BooleanVar(value=False) for _ in range(3)]
+        self.var_hpet_buff_key=[tk.StringVar(value='F8') for _ in range(3)]
+        self.var_hpet_buff_sec=[tk.IntVar(value=300) for _ in range(3)]
+        self.var_hpet_follow_sec=tk.DoubleVar(value=3.0)  # 跟隨檢查間隔
+
         # 遠程
         self.var_rng_key=tk.StringVar(value='F1')
         self.var_rng_dist=tk.IntVar(value=150)
@@ -1595,7 +1655,7 @@ class BotApp:
         self.log(f"設定已刪除: {name}")
 
     def _calibrate_hp(self):
-        """手動校準 HP/MP 條位置 — 使用者點擊兩下"""
+        """手動校準 HP/MP 條位置 — 把滑鼠移到位置後按空白鍵確認"""
         from tkinter import messagebox
         g = find_game()
         if not g:
@@ -1604,48 +1664,41 @@ class BotApp:
         cx, cy, cw, ch = get_rect(g[0])
 
         messagebox.showinfo("校準 HP 條",
-            "接下來請在遊戲畫面中：\n\n"
-            "1. 點擊 HP 條的【左端】\n"
-            "2. 再點擊 HP 條的【右端】\n\n"
-            "（請確保 HP 是滿的）\n\n"
-            "按確定後開始，你有 10 秒鐘", parent=self.root)
+            "操作方式：\n\n"
+            "1. 把滑鼠移到 HP 條的【左端】，按【空白鍵】確認\n"
+            "2. 把滑鼠移到 HP 條的【右端】，按【空白鍵】確認\n\n"
+            "（請確保 HP 是滿的）\n"
+            "每步有 15 秒鐘", parent=self.root)
 
-        self.log("校準中：請點擊 HP 條左端...")
-        self._status("校準HP：點左端", '#e67e22')
+        self.log("校準中：移滑鼠到 HP 條左端，按空白鍵...")
+        self._status("校準HP：移到左端按空白鍵", '#e67e22')
 
-        import ctypes.wintypes
-        clicks = []
-
-        def wait_click():
-            prev = False
+        def wait_space():
+            """等使用者按空白鍵，回傳當前滑鼠位置"""
             start = time.time()
-            while time.time() - start < 10:
-                lmb = bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
-                if lmb and not prev:
+            while time.time() - start < 15:
+                if keyboard.is_pressed('space'):
                     pt = ctypes.wintypes.POINT()
                     ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                    time.sleep(0.3)  # 防重複觸發
                     return (pt.x, pt.y)
-                prev = lmb
-                time.sleep(0.02)
+                time.sleep(0.05)
             return None
 
-        # 等第一次點擊（HP 條左端）
-        p1 = wait_click()
+        p1 = wait_space()
         if not p1:
             self.log("校準超時")
             return
         self.log(f"HP左端: ({p1[0]},{p1[1]})")
-        self._status("校準HP：點右端", '#e67e22')
-        time.sleep(0.3)
+        self._status("校準HP：移到右端按空白鍵", '#e67e22')
 
-        # 等第二次點擊（HP 條右端）
-        p2 = wait_click()
+        p2 = wait_space()
         if not p2:
             self.log("校準超時")
             return
         self.log(f"HP右端: ({p2[0]},{p2[1]})")
 
-        # 計算比例並儲存
+        # 計算比例
         x1_pct = (p1[0] - cx) / cw
         x2_pct = (p2[0] - cx) / cw
         y_pct = ((p1[1] + p2[1]) / 2 - cy) / ch
@@ -1654,19 +1707,17 @@ class BotApp:
         bars._auto_found = True
         bars._hp_ever_read = False
 
-        # 儲存到設定檔
         cfg = {'hp_bar': [x1_pct, x2_pct, y_pct]}
 
-        # 問是否也校準 MP
-        if messagebox.askyesno("校準 MP 條", "要繼續校準 MP 條嗎？\n\n點擊 MP 條的左端和右端", parent=self.root):
-            self.log("校準中：請點擊 MP 條左端...")
-            self._status("校準MP：點左端", '#3498db')
-            p3 = wait_click()
+        # MP 校準
+        if messagebox.askyesno("校準 MP 條", "要繼續校準 MP 條嗎？\n\n移滑鼠到 MP 條左端→空白鍵\n移滑鼠到 MP 條右端→空白鍵", parent=self.root):
+            self.log("校準中：移滑鼠到 MP 條左端，按空白鍵...")
+            self._status("校準MP：移到左端按空白鍵", '#3498db')
+            p3 = wait_space()
             if p3:
                 self.log(f"MP左端: ({p3[0]},{p3[1]})")
-                self._status("校準MP：點右端", '#3498db')
-                time.sleep(0.3)
-                p4 = wait_click()
+                self._status("校準MP：移到右端按空白鍵", '#3498db')
+                p4 = wait_space()
                 if p4:
                     self.log(f"MP右端: ({p4[0]},{p4[1]})")
                     mx1 = (p3[0] - cx) / cw
@@ -2037,7 +2088,7 @@ class BotApp:
         p=self.pages['模式']
         sf=self._section(p,"掛機模式");sf.pack(fill='x',padx=10,pady=5)
         r=self._frame(sf);r.pack(fill='x',pady=3)
-        for m in ['近戰','遠程','定點','純定點','墮落之地','召喚','隊伍','地監','補血機']:
+        for m in ['近戰','遠程','定點','純定點','墮落之地','召喚','隊伍','地監','補血機','高寵輔助']:
             tk.Radiobutton(r,text=m,variable=self.var_mode,value=m,bg=BG2,fg=FG,
                            selectcolor=ACC2,activebackground=BG2,font=FONTS,
                            command=self._on_mode).pack(side='left',padx=6)
@@ -2127,6 +2178,29 @@ class BotApp:
         r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
         self._chk(r,"也補自己",self.var_healer_self).pack(side='left')
         tk.Label(f,text="站著不動，專門幫隊友補血\n偵測隊伍 UI 的 HP 條\n點治癒鍵 → 點隊友名字",bg=BG2,fg='#888',font=FONTS).pack(padx=6,pady=6)
+
+        # 高寵輔助
+        f=self._section(p,"高寵輔助設定");self.mode_frames['高寵輔助']=f
+        r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
+        self._chk(r,"自動跟隨隊友",self.var_hpet_follow).pack(side='left')
+        self._lbl(r,"每").pack(side='left',padx=(8,1))
+        self._spin(r,self.var_hpet_follow_sec,1,10,w=4,inc=0.5).pack(side='left')
+        self._lbl(r,"秒檢查").pack(side='left')
+        r=self._frame(f);r.pack(fill='x',padx=6,pady=3)
+        self._lbl(r,"治癒鍵:").pack(side='left')
+        self._combo(r,self.var_hpet_heal_key,FKEYS,w=3).pack(side='left',padx=3)
+        self._lbl(r,"HP<").pack(side='left')
+        self._spin(r,self.var_hpet_heal_thr,20,90,w=3,inc=10).pack(side='left')
+        self._lbl(r,"%").pack(side='left')
+        # 3 組 Buff
+        for i in range(3):
+            r=self._frame(f);r.pack(fill='x',padx=6,pady=1)
+            self._chk(r,f"Buff{i+1}",self.var_hpet_buff_en[i]).pack(side='left')
+            self._combo(r,self.var_hpet_buff_key[i],FKEYS,w=3).pack(side='left',padx=3)
+            self._lbl(r,"每").pack(side='left')
+            self._spin(r,self.var_hpet_buff_sec[i],30,3600,w=5,inc=30).pack(side='left')
+            self._lbl(r,"秒").pack(side='left')
+        tk.Label(f,text="自動跟隨隊友+補血+上Buff\n偵測隊友頭上的玫瑰紅血條追蹤位置\n補血/Buff 點左下隊伍 UI 施放",bg=BG2,fg='#888',font=FONTS).pack(padx=6,pady=6)
 
         self._on_mode()
 
@@ -2502,11 +2576,13 @@ class BotApp:
         if hp_unknown or not self.var_ocr_en.get():
             bars._hp_max = 0
             bars._mp_max = 0
-        # debug：每 10 秒顯示 HP/MP 讀值，方便排查
+        # debug：每 5 秒顯示 HP/MP 讀值
         if not hasattr(self, '_last_hp_debug'):
             self._last_hp_debug = 0
-        if now - self._last_hp_debug > 10:
-            self.log(f"[HP={bars._hp_cur}/{bars._hp_max} MP={bars._mp_cur}/{bars._mp_max} OCR={getattr(bars,'_last_ocr_text','')}]")
+        if now - self._last_hp_debug > 5:
+            hp_pct = f"{hp*100:.0f}%" if hp >= 0 else "?"
+            mp_pct = f"{mp*100:.0f}%" if mp >= 0 else "?"
+            self.log(f"[HP={hp_pct} MP={mp_pct} 偵測={'像素' if bars._hp_ever_read else '定時'}]")
             self._last_hp_debug = now
 
         # Buff（不需要 HP 值，定時觸發）
@@ -2943,6 +3019,81 @@ class BotApp:
                 else:
                     time.sleep(0.1)
                 continue  # 補血機不打怪
+
+            # ── 高寵輔助模式 ──
+            if self.var_mode.get() == '高寵輔助':
+                now_hp = time.time()
+
+                # 1. 自動跟隨隊友（偵測畫面中的玫瑰紅血條）
+                follow_timer = timers.get('hpet_follow', 0)
+                if self.var_hpet_follow.get() and now_hp - follow_timer > self.var_hpet_follow_sec.get():
+                    teammate_pos = _find_teammate_bar(cx, cy, cw, ch)
+                    if teammate_pos:
+                        tx, ty = teammate_pos
+                        # 計算角色中心
+                        sh_s = int(ch * 0.75)
+                        my_x = cx + cw // 2
+                        my_y = cy + sh_s // 2
+                        # 距離太遠才跟隨（避免原地抖動）
+                        dist = math.sqrt((tx - my_x)**2 + (ty - my_y)**2)
+                        if dist > 80:
+                            # 點擊隊友血條下方的地面跟過去
+                            click_y = min(ty + 50, cy + sh_s - 20)
+                            ctypes.windll.user32.SetForegroundWindow(hwnd)
+                            game_click(tx, click_y)
+                            self._status(f"跟隨中 距離{dist:.0f}", '#27ae60')
+                            self.log(f"跟隨隊友 ({tx},{ty}) 距離{dist:.0f}")
+                        else:
+                            self._status("高寵待命", '#27ae60')
+                    else:
+                        self._status("找不到隊友", '#f5a623')
+                    timers['hpet_follow'] = now_hp
+
+                # 2. 補血（偵測左下隊伍 UI）
+                heal_timer = timers.get('hpet_heal', 0)
+                if now_hp - heal_timer > 2:
+                    thr = self.var_hpet_heal_thr.get() / 100
+                    for slot in range(1, 8):  # slot 0 是自己
+                        if not _is_party_slot_occupied(cx, cy, cw, ch, slot):
+                            continue
+                        hp_ratio = _read_party_hp(cx, cy, cw, ch, slot)
+                        if hp_ratio < 0:
+                            continue
+                        if hp_ratio < thr:
+                            ctypes.windll.user32.SetForegroundWindow(hwnd)
+                            self._click_hotbar(cx, cy, cw, ch, self.var_hpet_heal_key.get(), clicks=4)
+                            time.sleep(0.2)
+                            pos = _get_party_slot_pos(cx, cy, cw, ch, slot)
+                            game_click(pos['name'][0], pos['name'][1])
+                            time.sleep(0.3)
+                            self.heals += 1
+                            self.log(f"高寵補血 slot{slot} HP={hp_ratio*100:.0f}%")
+                            break
+                    timers['hpet_heal'] = now_hp
+
+                # 3. 上 Buff（定時對隊友施放）
+                for i in range(3):
+                    if not self.var_hpet_buff_en[i].get():
+                        continue
+                    buff_timer = timers.get(f'hpet_buff_{i}', 0)
+                    if now_hp - buff_timer > self.var_hpet_buff_sec[i].get():
+                        ctypes.windll.user32.SetForegroundWindow(hwnd)
+                        self._click_hotbar(cx, cy, cw, ch, self.var_hpet_buff_key[i].get(), clicks=4)
+                        time.sleep(0.2)
+                        # 點第一個隊友（slot 1）
+                        for slot in range(1, 8):
+                            if _is_party_slot_occupied(cx, cy, cw, ch, slot):
+                                pos = _get_party_slot_pos(cx, cy, cw, ch, slot)
+                                game_click(pos['name'][0], pos['name'][1])
+                                time.sleep(0.3)
+                                break
+                        timers[f'hpet_buff_{i}'] = now_hp
+                        self.buffs += 1
+                        self.log(f"高寵Buff{i+1}({self.var_hpet_buff_key[i].get()})")
+
+                self._stats()
+                time.sleep(0.3)
+                continue  # 高寵不打怪
 
             # ── 自動練功循環 ──
             if not self.var_attack.get():
