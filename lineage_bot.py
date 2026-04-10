@@ -71,8 +71,9 @@ except: HAS_INTERCEPTION = False
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, 'bot_config.json')
-PROFILES_DIR = os.path.join(SCRIPT_DIR, 'profiles')
-os.makedirs(PROFILES_DIR, exist_ok=True)
+CONFIG_DIR = os.path.join(SCRIPT_DIR, 'config')
+os.makedirs(CONFIG_DIR, exist_ok=True)
+PROFILES_DIR = CONFIG_DIR  # 向後兼容
 SS_DIR = os.path.join(SCRIPT_DIR, 'bot_screenshots')
 os.makedirs(SS_DIR, exist_ok=True)
 
@@ -1628,18 +1629,24 @@ class BotApp:
         info=f"點擊:{'interception' if HAS_INTERCEPTION else 'mouse_lib'} | 怪物庫:{len(MONSTER_NAMES)}隻"
         tk.Label(p,text=info,bg=BG2,fg='#27ae60' if HAS_INTERCEPTION else '#f5a623',font=('Consolas',7)).pack()
 
-        # 設定檔管理
-        sf_prof=self._section(p,"設定檔");sf_prof.pack(fill='x',padx=10,pady=3)
+        # 設定檔管理（config/ 資料夾）
+        sf_prof=self._section(p,"設定檔（config/）");sf_prof.pack(fill='x',padx=10,pady=3)
         r=self._frame(sf_prof);r.pack(fill='x',pady=2)
+        self._lbl(r,"專案:").pack(side='left')
         self.var_profile=tk.StringVar(value='')
-        self.profile_combo=self._combo(r,self.var_profile,list_profiles(),w=14)
+        self.profile_combo=self._combo(r,self.var_profile,list_profiles(),w=16)
         self.profile_combo.pack(side='left',padx=2)
-        tk.Button(r,text="載入",font=FONTS,bg='#2980b9',fg='white',
+        tk.Button(r,text="套用",font=FONTS,bg='#2980b9',fg='white',
                   command=self._load_profile).pack(side='left',padx=2)
-        tk.Button(r,text="儲存",font=FONTS,bg='#27ae60',fg='white',
+        r2=self._frame(sf_prof);r2.pack(fill='x',pady=2)
+        tk.Button(r2,text="儲存目前設定",font=FONTS,bg='#27ae60',fg='white',
                   command=self._save_profile).pack(side='left',padx=2)
-        tk.Button(r,text="刪除",font=FONTS,bg=ACC,fg='white',
+        tk.Button(r2,text="另存新檔",font=FONTS,bg='#27ae60',fg='white',
+                  command=self._saveas_profile).pack(side='left',padx=2)
+        tk.Button(r2,text="刪除",font=FONTS,bg=ACC,fg='white',
                   command=self._delete_profile).pack(side='left',padx=2)
+        tk.Button(r2,text="開啟資料夾",font=FONTS,bg='#555',fg='white',
+                  command=lambda:os.startfile(CONFIG_DIR)).pack(side='left',padx=2)
 
         # Debug + 校準
         r=self._frame(p);r.pack(fill='x',padx=10,pady=2)
@@ -1657,27 +1664,46 @@ class BotApp:
         self.profile_combo['values'] = profiles
 
     def _save_profile(self):
+        """儲存到目前選擇的設定檔（覆蓋）"""
         name = self.var_profile.get().strip()
         if not name:
-            from tkinter import simpledialog
-            name = simpledialog.askstring("儲存設定檔", "請輸入設定檔名稱:", parent=self.root)
-        if not name:return
+            self._saveas_profile()
+            return
+        save_profile(self, name)
+        self.log(f"設定已儲存: config/{name}.json")
+
+    def _saveas_profile(self):
+        """另存新檔"""
+        from tkinter import simpledialog
+        name = simpledialog.askstring("另存設定檔",
+            "請輸入設定檔名稱:\n（例如：近戰骑士、遠程法師、地監寵物）",
+            parent=self.root)
+        if not name:
+            return
+        name = name.strip()
         save_profile(self, name)
         self.var_profile.set(name)
         self._refresh_profiles()
-        self.log(f"設定已儲存: {name}")
+        self.log(f"設定已儲存: config/{name}.json")
 
     def _load_profile(self):
+        """套用選擇的設定檔"""
         name = self.var_profile.get().strip()
         if not name:
             self.log("請先選擇設定檔")
             return
         load_profile(self, name)
-        self.log(f"設定已載入: {name}")
+        self.log(f"已套用設定檔: {name}")
+        # 套用後更新 GUI 顯示
+        try:
+            self._on_mode()
+        except:
+            pass
 
     def _delete_profile(self):
         name = self.var_profile.get().strip()
-        if not name:return
+        if not name:
+            return
         from tkinter import messagebox
         if not messagebox.askyesno("刪除設定檔", f"確定刪除「{name}」？", parent=self.root):
             return
