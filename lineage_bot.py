@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "16.5"
+BOT_VERSION = "16.6"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -2652,28 +2652,26 @@ class BotApp:
             self.buffs += 1
             self.log(f"喝綠水({k})")
 
-        # 死亡（HP 連續 3 次讀到 0 才判定，避免誤判）
+        # 死亡（HP 連續 3 次讀到 0，等待復活不停止）
         if hp >= 0 and hp <= 0.01:
             self._death_count = getattr(self, '_death_count', 0) + 1
             if self._death_count >= 3:
-                self.log("角色死亡！（連續3次HP=0）")
+                self.log("角色死亡！等待復活...")
                 alert('death')
-                self.running = False
-                self._status("死亡！", ACC)
-                return hp, mp
+                self._status("死亡！等待復活", ACC)
+                time.sleep(10)
+                self._death_count = 0
         else:
             self._death_count = 0
 
-        # 緊急回城（最高優先，僅在 HP 成功讀取時觸發）
+        # 緊急回城（最高優先，回城後繼續等待不停止）
         if self.var_recall_en.get() and hp >= 0 and hp < self.var_recall_thr.get() / 100:
             ctypes.windll.user32.SetForegroundWindow(hwnd)
             self._click_hotbar(cx, cy, cw, ch, self.var_recall_key.get(), clicks=2)
             self.log(f"緊急回城！HP={hp*100:.0f}%")
             alert('hp')
-            self.running = False
-            self._status("緊急回城", ACC)
-            time.sleep(5)
-            return hp, mp
+            self._status("緊急回城", '#f5a623')
+            time.sleep(10)  # 等回城完成
 
         # 治癒術（HP 低於閾值 / OCR 關閉時定時施放）
         heal_trigger = (hp >= 0 and hp < self.var_heal_thr.get() / 100) \
@@ -2753,9 +2751,8 @@ class BotApp:
                         alert('pk')
                         if act == '回城':
                             self._click_hotbar(cx, cy, cw, ch, self.var_recall_key.get(), clicks=2)
-                            self.running = False
-                            self._status("PK回城", ACC)
-                            return hp, mp
+                            self._status("PK回城", '#f5a623')
+                            time.sleep(10)
                         elif act == '逃跑':
                             # 隨機方向逃跑
                             sh_s = int(ch * 0.75)
@@ -2903,10 +2900,12 @@ class BotApp:
         max_drift = 500  # 超過此距離就走回來
 
         g = find_game()
+        while not g and self.running:
+            self.log("找不到視窗！等待遊戲啟動...")
+            self._status("等待遊戲視窗", '#f5a623')
+            time.sleep(5)
+            g = find_game()
         if not g:
-            self.log("找不到視窗！")
-            self.running = False
-            self._status("找不到視窗", ACC)
             return
         self.log(f"視窗: {g[1][:30]}...")
 
@@ -2999,11 +2998,11 @@ class BotApp:
                 dcc += 1
                 self.log(f"找不到視窗 ({dcc}/10)")
                 if self.var_dc_detect.get() and dcc >= 10:
-                    self.log("斷線！連續10次找不到視窗")
+                    self.log("斷線！連續10次找不到視窗，等待重連...")
                     alert('dc')
-                    self.running = False
-                    self._status("斷線！", ACC)
-                    return
+                    self._status("斷線！等待重連", '#f5a623')
+                    time.sleep(30)  # 等 30 秒讓遊戲重連
+                    dcc = 0
                 time.sleep(2)
                 continue
             dcc = 0
@@ -3290,15 +3289,13 @@ class BotApp:
 
                     # ── 自動回城販賣（每 N 次擊殺檢查） ──
                     if self.var_autosell_en.get() and self.kills % 20 == 0 and self.kills > 0:
-                        # 簡易背包滿度估算：每 20 殺檢查，用擊殺數估算
-                        est_full = min(95, self.kills * 2)  # 粗估
+                        est_full = min(95, self.kills * 2)
                         if est_full >= self.var_autosell_full.get():
                             self.log(f"背包估計 {est_full}% 滿，回城販賣")
                             self._click_hotbar(cx, cy, cw, ch, self.var_autosell_recall.get(), clicks=2)
                             self._status("回城販賣", '#f5a623')
                             alert('sell')
-                            self.running = False
-                            break
+                            time.sleep(15)  # 等回城完成
 
                     # ── 零延遲轉移：有預掃描結果就直接打 ──
                     if next_mon and self.running:
