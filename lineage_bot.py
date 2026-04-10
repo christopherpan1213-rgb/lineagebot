@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "17.3"
+BOT_VERSION = "17.5"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -2488,8 +2488,16 @@ class BotApp:
         self._last_activity = time.time()  # 看門狗用
         ts=time.strftime("%H:%M:%S")
         def _u():
-            self.log_w.config(state='normal');self.log_w.insert('end',f"[{ts}] {msg}\n")
-            self.log_w.see('end');self.log_w.config(state='disabled')
+            try:
+                self.log_w.config(state='normal')
+                self.log_w.insert('end',f"[{ts}] {msg}\n")
+                # 限制日誌行數避免記憶體爆（保留最新 500 行）
+                lines = int(self.log_w.index('end-1c').split('.')[0])
+                if lines > 500:
+                    self.log_w.delete('1.0', f'{lines-400}.0')
+                self.log_w.see('end')
+                self.log_w.config(state='disabled')
+            except: pass
         self.root.after(0,_u)
 
     def _bar(self,cv,tl,pct,w=120,cur=0,mx=0,bar_type='hp'):
@@ -2718,8 +2726,8 @@ class BotApp:
                     hp_unknown = False
                     self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max, bar_type='hp')
                 else:
-                    # HP 讀不到，顯示「?」
-                    self.hp_tl.config(text="無法讀取")
+                    # HP 讀不到，顯示「?」（用 root.after 避免跨執行緒 GUI 操作）
+                    self.root.after(0, lambda: self.hp_tl.config(text="無法讀取"))
                 mp = bars.mp(None, cx, cy, cw, ch)
                 if mp >= 0:
                     self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max, bar_type='mp')
@@ -3514,24 +3522,39 @@ class BotApp:
                     time.sleep(1 + random.uniform(0, 0.5))
           except Exception as e:
             import traceback
+            err_msg = traceback.format_exc()[:300]
             self.log(f"[錯誤] {e} — 自動恢復")
-            self.log(traceback.format_exc()[:200])
+            self.log(err_msg)
+            # 記錄到檔案
+            try:
+                with open(os.path.join(SCRIPT_DIR, 'crash_log.txt'), 'a', encoding='utf-8') as f:
+                    f.write(f"\n[{time.strftime('%H:%M:%S')}] {e}\n{err_msg}\n")
+            except: pass
             time.sleep(1)
             continue
 
     def run(self):self.log("就緒");self.root.mainloop()
 
 if __name__=="__main__":
-    try:
-        BotApp().run()
-    except Exception as e:
-        import traceback
-        # 寫錯誤到檔案，方便除錯
+    while True:
         try:
-            with open(os.path.join(SCRIPT_DIR, 'crash_log.txt'), 'w', encoding='utf-8') as f:
-                f.write(f"崩潰時間: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"錯誤: {e}\n\n")
-                f.write(traceback.format_exc())
-        except:
-            pass
-        raise
+            BotApp().run()
+            break  # 正常關閉
+        except SystemExit:
+            break  # sys.exit() 正常退出
+        except KeyboardInterrupt:
+            break  # Ctrl+C 正常退出
+        except BaseException as e:
+            import traceback
+            # 寫錯誤到檔案
+            try:
+                with open(os.path.join(SCRIPT_DIR, 'crash_log.txt'), 'a', encoding='utf-8') as f:
+                    f.write(f"\n{'='*50}\n")
+                    f.write(f"崩潰時間: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"錯誤: {e}\n\n")
+                    f.write(traceback.format_exc())
+            except:
+                pass
+            # 不退出，重新啟動
+            print(f"程式崩潰: {e}，5 秒後重啟...")
+            time.sleep(5)
