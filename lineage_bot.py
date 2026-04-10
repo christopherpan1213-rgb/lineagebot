@@ -3271,31 +3271,16 @@ class BotApp:
 
                     # 定點模式不回定點（角色本來就不動）
 
-                    # 快速撿物
+                    # 快速撿物：原地按 F4
                     if self.var_loot.get() and mode not in ('定點','純定點','墮落之地') and self.running:
-                        if mode in ('近戰', '地監'):
-                            # 近戰/地監：怪死後按 F4 拾取 + 掃描撿物
-                            ctypes.windll.user32.SetForegroundWindow(hwnd)
-                            try:
-                                interception.press('f4', presses=5, interval=0.1)
-                            except:
-                                for _ in range(5):
-                                    press_key('F4')
-                                    time.sleep(0.1)
-                            time.sleep(0.2)
-                            # 再掃描附近掉落物點擊拾取
-                            for _ in range(3):
-                                if not scan_loot(cx, cy, cw, ch, hwnd):
-                                    break
-                                self.loots += 1
-                                time.sleep(0.15)
-                            self.loots += 1
-                        else:
-                            for _ in range(2):
-                                if not scan_loot(cx, cy, cw, ch, hwnd):
-                                    break
-                                self.loots += 1
+                        ctypes.windll.user32.SetForegroundWindow(hwnd)
+                        try:
+                            interception.press('f4', presses=5, interval=0.1)
+                        except:
+                            for _ in range(5):
+                                press_key('F4')
                                 time.sleep(0.1)
+                        self.loots += 1
                         self._stats()
 
                     # ── 自動回城販賣（每 N 次擊殺檢查） ──
