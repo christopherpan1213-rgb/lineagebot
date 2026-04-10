@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "17.2"
+BOT_VERSION = "17.3"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -3245,11 +3245,11 @@ class BotApp:
                                 g_ch = bar[:,:,1].astype(int)
                                 b_ch = bar[:,:,0].astype(int)
                                 red = (r_ch > 120) & ((r_ch - g_ch) > 40) & ((r_ch - b_ch) > 40)
-                                red_pct = red.sum() / max(1, bar.size // 3)
-                                # 歸一化
-                                max_r = getattr(self, '_party_max_red', red_pct)
-                                if red_pct > max_r: max_r = red_pct; self._party_max_red = max_r
-                                hp_ratio = red_pct / max_r if max_r > 0.01 else 1.0
+                                # 每行紅色像素數，取中位數 = 紅色寬度
+                                row_counts = [int(red[row].sum()) for row in range(bar.shape[0]) if red[row].sum() > 0]
+                                red_width = float(np.median(row_counts)) if row_counts else 0
+                                # 滿血寬度 = 校準時的血條寬度 hw
+                                hp_ratio = min(1.0, red_width / max(1, hw))
 
                                 # 每 3 秒顯示
                                 if not hasattr(self, '_last_party_debug') or now_hp - self._last_party_debug > 3:
