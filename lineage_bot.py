@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "17.1"
+BOT_VERSION = "17.2"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -1672,6 +1672,7 @@ class BotApp:
         # Debug + 校準
         r=self._frame(p);r.pack(fill='x',padx=10,pady=2)
         tk.Button(r,text="校準HP條",font=FONTS,bg='#e67e22',fg='white',command=self._calibrate_hp).pack(side='left',padx=3)
+        tk.Button(r,text="校準隊友",font=FONTS,bg='#2980b9',fg='white',command=self._calibrate_party).pack(side='left',padx=3)
         tk.Button(r,text="HP偵測截圖",font=FONTS,bg='#8e44ad',fg='white',command=self._debug_hp).pack(side='left',padx=3)
 
         # 日誌
@@ -1816,6 +1817,83 @@ class BotApp:
         # 測試讀取
         hp = bars.hp(None, cx, cy, cw, ch)
         self.log(f"測試讀取 HP={hp*100:.0f}%" if hp >= 0 else "測試讀取失敗")
+
+    def _calibrate_party(self):
+        """校準隊友位置 — 跟 HP 條一樣標左端右端 + 名字位置"""
+        from tkinter import messagebox
+        g = find_game()
+        if not g:
+            self.log("找不到遊戲視窗！"); return
+        cx, cy, cw, ch = get_rect(g[0])
+
+        messagebox.showinfo("校準隊友",
+            "步驟：\n\n"
+            "1. 移滑鼠到隊友 HP 條【左端】→ 按空白鍵\n"
+            "2. 移滑鼠到隊友 HP 條【右端】→ 按空白鍵\n"
+            "3. 移滑鼠到隊友【名字】中心 → 按空白鍵\n\n"
+            "（在左下隊伍 UI 的隊友格子操作）\n"
+            "每步 15 秒", parent=self.root)
+
+        def wait_space():
+            start = time.time()
+            while time.time() - start < 15:
+                if keyboard.is_pressed('space'):
+                    pt = ctypes.wintypes.POINT()
+                    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                    time.sleep(0.3)
+                    return (pt.x, pt.y)
+                time.sleep(0.05)
+            return None
+
+        # 步驟 1：HP 條左端
+        self.log("校準：移到隊友 HP 條左端，按空白鍵")
+        self._status("隊友HP條左端→空白鍵", '#2980b9')
+        p1 = wait_space()
+        if not p1: self.log("校準超時"); return
+        self.log(f"HP左端: ({p1[0]},{p1[1]})")
+
+        # 步驟 2：HP 條右端
+        self._status("隊友HP條右端→空白鍵", '#2980b9')
+        self.log("校準：移到隊友 HP 條右端，按空白鍵")
+        p2 = wait_space()
+        if not p2: self.log("校準超時"); return
+        self.log(f"HP右端: ({p2[0]},{p2[1]})")
+
+        # 步驟 3：名字中心
+        self._status("隊友名字中心→空白鍵", '#2980b9')
+        self.log("校準：移到隊友名字中心，按空白鍵")
+        p3 = wait_space()
+        if not p3: self.log("校準超時"); return
+        self.log(f"名字位置: ({p3[0]},{p3[1]})")
+
+        # 儲存
+        hp_y = (p1[1] + p2[1]) // 2
+        self._party_click_pos = p3
+        self._party_hp_area = (p1[0], hp_y - 2, p2[0] - p1[0], 5)
+
+        cfg_path = os.path.join(SCRIPT_DIR, 'hp_config.json')
+        try:
+            with open(cfg_path) as f: cfg = json.load(f)
+        except: cfg = {}
+        cfg['party_click'] = list(p3)
+        cfg['party_hp_area'] = [p1[0], hp_y - 2, p2[0] - p1[0], 5]
+        with open(cfg_path, 'w') as f:
+            json.dump(cfg, f, indent=2)
+
+        self.log(f"校準完成！HP條({p1[0]},{hp_y})-({p2[0]},{hp_y}) 名字({p3[0]},{p3[1]})")
+        self._status("校準完成", '#27ae60')
+
+        # 測試讀取
+        try:
+            hx, hy, hw, hh = self._party_hp_area
+            bar = grab_region(hx, hy, hw, hh)
+            r_ch = bar[:,:,2].astype(int)
+            g_ch = bar[:,:,1].astype(int)
+            red = (r_ch > 120) & ((r_ch - g_ch) > 40)
+            pct = red.sum() / max(1, bar.size // 3)
+            self.log(f"測試讀取隊友HP: {pct*100:.0f}%")
+        except Exception as e:
+            self.log(f"測試讀取失敗: {e}")
 
     def _debug_hp(self):
         """截圖並標記 HP/MP 條偵測位置，存到桌面"""
@@ -3138,37 +3216,61 @@ class BotApp:
                         self._status("找不到隊友血條", '#f5a623')
                     timers['hpet_follow'] = now_hp
 
-                # 2. 補血（偵測左下隊伍 UI，每 0.8 秒檢查）
+                # 2. 補血（用校準的隊友位置，或 fallback 到 slot 偵測）
                 heal_timer = timers.get('hpet_heal', 0)
                 if now_hp - heal_timer > 0.8:
                     thr = self.var_hpet_heal_thr.get() / 100
-                    found_any = False
-                    for slot in range(1, 8):  # slot 0 是自己
-                        occupied = _is_party_slot_occupied(cx, cy, cw, ch, slot)
-                        if not occupied:
-                            continue
-                        found_any = True
-                        hp_ratio = _read_party_hp(cx, cy, cw, ch, slot)
-                        # 每 3 秒顯示隊友 HP 讀值
-                        if not hasattr(self, '_last_party_debug') or now_hp - self._last_party_debug > 3:
-                            pos_info = _get_party_slot_pos(cx, cy, cw, ch, slot)
-                            self.log(f"隊友slot{slot} HP={hp_ratio*100:.0f}% 位置({pos_info['name'][0]},{pos_info['name'][1]})" if hp_ratio >= 0 else f"隊友slot{slot} 讀取失敗")
-                            self._last_party_debug = now_hp
-                        if hp_ratio < 0:
-                            continue
-                        if hp_ratio < thr:
-                            ctypes.windll.user32.SetForegroundWindow(hwnd)
-                            self._click_hotbar(cx, cy, cw, ch, self.var_hpet_heal_key.get(), clicks=4)
-                            time.sleep(0.2)
-                            pos = _get_party_slot_pos(cx, cy, cw, ch, slot)
-                            game_click(pos['name'][0], pos['name'][1])
-                            time.sleep(0.3)
-                            self.heals += 1
-                            self.log(f"高寵補血 slot{slot} HP={hp_ratio*100:.0f}%")
-                            break
-                    if not found_any and (not hasattr(self, '_last_nofound') or now_hp - self._last_nofound > 10):
-                        self.log("找不到隊友（左下隊伍UI無人）")
-                        self._last_nofound = now_hp
+
+                    # 載入校準位置
+                    if not hasattr(self, '_party_click_pos'):
+                        try:
+                            cfg_path = os.path.join(SCRIPT_DIR, 'hp_config.json')
+                            with open(cfg_path) as f:
+                                cfg = json.load(f)
+                            if 'party_click' in cfg:
+                                self._party_click_pos = tuple(cfg['party_click'])
+                                self._party_hp_area = tuple(cfg['party_hp_area'])
+                                self.log(f"載入隊友位置: {self._party_click_pos}")
+                        except:
+                            self._party_click_pos = None
+                            self._party_hp_area = None
+
+                    if hasattr(self, '_party_click_pos') and self._party_click_pos:
+                        # 用校準位置讀 HP
+                        try:
+                            hx, hy, hw, hh = self._party_hp_area
+                            bar = grab_region(hx, hy, hw, hh)
+                            if bar is not None and bar.size > 0:
+                                r_ch = bar[:,:,2].astype(int)
+                                g_ch = bar[:,:,1].astype(int)
+                                b_ch = bar[:,:,0].astype(int)
+                                red = (r_ch > 120) & ((r_ch - g_ch) > 40) & ((r_ch - b_ch) > 40)
+                                red_pct = red.sum() / max(1, bar.size // 3)
+                                # 歸一化
+                                max_r = getattr(self, '_party_max_red', red_pct)
+                                if red_pct > max_r: max_r = red_pct; self._party_max_red = max_r
+                                hp_ratio = red_pct / max_r if max_r > 0.01 else 1.0
+
+                                # 每 3 秒顯示
+                                if not hasattr(self, '_last_party_debug') or now_hp - self._last_party_debug > 3:
+                                    self.log(f"隊友HP={hp_ratio*100:.0f}%")
+                                    self._last_party_debug = now_hp
+
+                                if hp_ratio < thr:
+                                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                                    self._click_hotbar(cx, cy, cw, ch, self.var_hpet_heal_key.get(), clicks=2)
+                                    time.sleep(0.2)
+                                    game_click(self._party_click_pos[0], self._party_click_pos[1])
+                                    time.sleep(0.3)
+                                    self.heals += 1
+                                    self.log(f"高寵補血 HP={hp_ratio*100:.0f}%")
+                        except Exception as e:
+                            self.log(f"補血錯誤: {e}")
+                    else:
+                        if not hasattr(self, '_last_nofound') or now_hp - self._last_nofound > 10:
+                            self.log("請先校準隊友位置（狀態頁→校準隊友）")
+                            self._last_nofound = now_hp
+
                     timers['hpet_heal'] = now_hp
 
                 # 3. 上 Buff（定時對隊友施放）
