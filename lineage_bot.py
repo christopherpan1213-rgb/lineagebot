@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "16.6"
+BOT_VERSION = "16.7"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -1482,6 +1482,11 @@ class BotApp:
         self.var_autosell_full=tk.IntVar(value=80)      # 背包滿度%觸發
         self.var_autosell_recall=tk.StringVar(value='F12')  # 回城卷快捷鍵
 
+        # 無怪瞬移
+        self.var_nomob_tp_en=tk.BooleanVar(value=False)
+        self.var_nomob_tp_min=tk.IntVar(value=5)          # 幾分鐘沒打到怪
+        self.var_nomob_tp_key=tk.StringVar(value='F11')   # 瞬移卷軸快捷鍵
+
         # 高寵輔助模式
         self.var_hpet_follow=tk.BooleanVar(value=True)   # 自動跟隨隊友
         self.var_hpet_heal_key=tk.StringVar(value='F7')   # 治癒術快捷鍵
@@ -1941,6 +1946,13 @@ class BotApp:
         self._lbl(r,"背包>").pack(side='left')
         self._spin(r,self.var_autosell_full,50,95,w=3,inc=5).pack(side='left')
         self._lbl(r,"%").pack(side='left')
+
+        # 無怪瞬移
+        r=self._frame(sf);r.pack(fill='x',pady=1)
+        self._chk(r,"無怪瞬移",self.var_nomob_tp_en).pack(side='left')
+        self._combo(r,self.var_nomob_tp_key,FKEYS,w=3).pack(side='left',padx=3)
+        self._spin(r,self.var_nomob_tp_min,1,30,w=3,inc=1).pack(side='left')
+        self._lbl(r,"分鐘沒打到怪就使用").pack(side='left')
 
         # ── 反 PK 偵測 ──
         sf=self._section(p,"⚠ 反PK偵測");sf.pack(fill='x',padx=8,pady=2)
@@ -3270,6 +3282,7 @@ class BotApp:
                 self._set_state(BotState.SCANNING)
                 if killed:
                     self.kills += 1
+                    self._last_kill_time = time.time()  # 重置無怪計時
                     self.log(f"擊殺！(#{self.kills})")
                     self._stats()
 
@@ -3314,6 +3327,18 @@ class BotApp:
             else:
                 # ── 沒找到怪物 ──
                 no_monster_count += 1
+
+                # 無怪瞬移：超過 N 分鐘沒打到怪就用瞬移卷軸
+                if self.var_nomob_tp_en.get():
+                    last_kill = getattr(self, '_last_kill_time', time.time())
+                    mins = (time.time() - last_kill) / 60
+                    if mins >= self.var_nomob_tp_min.get():
+                        self.log(f"已{mins:.1f}分鐘沒打到怪，使用瞬移卷軸")
+                        self._click_hotbar(cx, cy, cw, ch, self.var_nomob_tp_key.get(), clicks=2)
+                        self._last_kill_time = time.time()  # 重置計時
+                        time.sleep(5)  # 等瞬移完成
+                        no_monster_count = 0
+                        continue
 
                 # 幀差分偵測遠處移動目標（掃描找不到時的補充）
                 if no_monster_count >= 2 and self.running:
