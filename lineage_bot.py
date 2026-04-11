@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "17.5"
+BOT_VERSION = "17.6"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -2502,36 +2502,41 @@ class BotApp:
 
     def _bar(self,cv,tl,pct,w=120,cur=0,mx=0,bar_type='hp'):
         def _u():
-            p=max(0,min(1,pct));cv.delete('all')
-            cv.create_rectangle(0,0,w,16,fill='#222',outline='')
-            c=ACC if p<0.3 else('#f5a623' if p<0.6 else'#27ae60')
-            cv.create_rectangle(0,0,int(w*p),16,fill=c,outline='')
-            # 用設定的最大值計算絕對數字
-            max_val = self.var_max_hp.get() if bar_type=='hp' else self.var_max_mp.get()
-            if max_val > 0:
-                abs_cur = int(p * max_val)
-                tl.config(text=f"{abs_cur}/{max_val}")
-            elif mx > 0:
-                tl.config(text=f"{cur}/{mx}")
-            else:
-                tl.config(text=f"{p*100:.0f}%")
+            try:
+                p=max(0,min(1,pct));cv.delete('all')
+                cv.create_rectangle(0,0,w,16,fill='#222',outline='')
+                c=ACC if p<0.3 else('#f5a623' if p<0.6 else'#27ae60')
+                cv.create_rectangle(0,0,int(w*p),16,fill=c,outline='')
+                max_val = self.var_max_hp.get() if bar_type=='hp' else self.var_max_mp.get()
+                if max_val > 0:
+                    abs_cur = int(p * max_val)
+                    tl.config(text=f"{abs_cur}/{max_val}")
+                elif mx > 0:
+                    tl.config(text=f"{cur}/{mx}")
+                else:
+                    tl.config(text=f"{p*100:.0f}%")
+            except: pass
         self.root.after(0,_u)
 
     def _stats(self):
         def _u():
-            state = getattr(self, 'bot_state', BotState.IDLE).value
-            self.stat_lbl.config(text=f"[{state}] 殺:{self.kills} 紅:{self.pots} 藍:{self.mpots} 治:{self.heals} B:{self.buffs} 撿:{self.loots}")
-            if self.t0:
-                e=time.time()-self.t0;h,m,s=int(e//3600),int(e%3600//60),int(e%60)
-                kph=self.kills/(e/3600) if e>60 else 0
-                self.time_lbl.config(text=f"{h:02d}:{m:02d}:{s:02d} | {kph:.1f} 殺/時")
+            try:
+                state = getattr(self, 'bot_state', BotState.IDLE).value
+                self.stat_lbl.config(text=f"[{state}] 殺:{self.kills} 紅:{self.pots} 藍:{self.mpots} 治:{self.heals} B:{self.buffs} 撿:{self.loots}")
+                if self.t0:
+                    e=time.time()-self.t0;h,m,s=int(e//3600),int(e%3600//60),int(e%60)
+                    kph=self.kills/(e/3600) if e>60 else 0
+                    self.time_lbl.config(text=f"{h:02d}:{m:02d}:{s:02d} | {kph:.1f} 殺/時")
+            except: pass
         self.root.after(0,_u)
 
     def _status(self,t,c='#aaa'):
         def _u():
-            self.status_lbl.config(text=t,fg=c)
-            self.start_btn.config(text="■ 停止" if self.running else "▶ 啟動",
+            try:
+                self.status_lbl.config(text=t,fg=c)
+                self.start_btn.config(text="■ 停止" if self.running else "▶ 啟動",
                                   bg=ACC if self.running else '#27ae60')
+            except: pass
         self.root.after(0,_u)
 
     def _toggle(self):
@@ -2753,7 +2758,7 @@ class BotApp:
         # debug：每 5 秒顯示 HP/MP 讀值
         if not hasattr(self, '_last_hp_debug'):
             self._last_hp_debug = 0
-        if now - self._last_hp_debug > 5:
+        if now - self._last_hp_debug > 15:
             hp_pct = f"{hp*100:.0f}%" if hp >= 0 else "?"
             mp_pct = f"{mp*100:.0f}%" if mp >= 0 else "?"
             self.log(f"[HP={hp_pct} MP={mp_pct} 偵測={'像素' if bars._hp_ever_read else '定時'}]")
