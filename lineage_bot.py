@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "18.1"
+BOT_VERSION = "18.2"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -2829,7 +2829,7 @@ class BotApp:
         else:
             # HP 無法讀取 → 定時喝水保底
             need_hp = now - timers['hp'] > self.var_hp_sec.get()
-        if self.var_hp_en.get() and need_hp and now - timers['hp'] > 4:
+        if self.var_hp_en.get() and need_hp and now - timers['hp'] > 2:
             k = self.var_hp_key.get()
             self._click_hotbar(cx, cy, cw, ch, k)
             timers['hp'] = now
@@ -2838,6 +2838,11 @@ class BotApp:
                 self.log(f"喝紅水({k}) HP={hp*100:.0f}%")
             else:
                 self.log(f"喝紅水({k}) 定時保底")
+            # 喝完水後重新讀 HP（避免下次讀到快捷欄位置的錯誤值）
+            time.sleep(0.5)
+            hp = bars.hp(None, cx, cy, cw, ch)
+            if hp >= 0:
+                self._prev_hp = hp
 
         # 藍水
         mp_thr = self.var_mp_thr.get() / 100
@@ -2845,7 +2850,7 @@ class BotApp:
             need_mp = mp < mp_thr
         else:
             need_mp = now - timers['mp'] > self.var_mp_sec.get()
-        if self.var_mp_en.get() and need_mp and now - timers['mp'] > 4:
+        if self.var_mp_en.get() and need_mp and now - timers['mp'] > 2:
             k = self.var_mp_key.get()
             self._click_hotbar(cx, cy, cw, ch, k)
             timers['mp'] = now
