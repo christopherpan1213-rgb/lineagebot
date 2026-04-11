@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "17.8"
+BOT_VERSION = "18.0"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -2569,9 +2569,12 @@ class BotApp:
 
     def _tick(self):
         if self.running:
-            self._stats()
-            # 每 3 分鐘自動存檔（防崩潰遺失設定）
+            # 統計每 10 秒更新一次（不是每秒）
             now = time.time()
+            if now - getattr(self, '_last_stats', 0) > 10:
+                self._stats()
+                self._last_stats = now
+            # 每 3 分鐘自動存檔
             if now - getattr(self, '_last_autosave', 0) > 180:
                 try: autosave(self)
                 except: pass
@@ -2738,17 +2741,7 @@ class BotApp:
                 hp = bars.hp(None, cx, cy, cw, ch)
                 if hp >= 0:
                     hp_unknown = False
-                    # 只在 HP 變化超過 2% 時才更新 GUI（減少 tkinter 壓力）
-                    prev_gui_hp = getattr(self, '_prev_gui_hp', -1)
-                    if abs(hp - prev_gui_hp) > 0.02:
-                        self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max, bar_type='hp')
-                        self._prev_gui_hp = hp
                 mp = bars.mp(None, cx, cy, cw, ch)
-                if mp >= 0:
-                    prev_gui_mp = getattr(self, '_prev_gui_mp', -1)
-                    if abs(mp - prev_gui_mp) > 0.02:
-                        self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max, bar_type='mp')
-                        self._prev_gui_mp = mp
 
                 # HP 急降即時反應（高寵/補血機跳過，100%→0%是誤判也跳過）
                 mode_now = self.var_mode.get()
@@ -2768,14 +2761,15 @@ class BotApp:
         if hp_unknown or not self.var_ocr_en.get():
             bars._hp_max = 0
             bars._mp_max = 0
-        # debug：每 5 秒顯示 HP/MP 讀值
-        if not hasattr(self, '_last_hp_debug'):
-            self._last_hp_debug = 0
-        if now - self._last_hp_debug > 15:
-            hp_pct = f"{hp*100:.0f}%" if hp >= 0 else "?"
-            mp_pct = f"{mp*100:.0f}%" if mp >= 0 else "?"
-            self.log(f"[HP={hp_pct} MP={mp_pct} 偵測={'像素' if bars._hp_ever_read else '定時'}]")
-            self._last_hp_debug = now
+        # GUI 更新（每 30 秒才更新一次，戰鬥中不頻繁更新避免崩潰）
+        if not hasattr(self, '_last_gui_update'):
+            self._last_gui_update = 0
+        if now - self._last_gui_update > 30:
+            if hp >= 0:
+                self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max, bar_type='hp')
+            if mp >= 0:
+                self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max, bar_type='mp')
+            self._last_gui_update = now
 
         # Buff（不需要 HP 值，定時觸發）
         if self.var_buff_en.get() and now - timers['buff'] > self.var_buff_sec.get():
@@ -3329,7 +3323,9 @@ class BotApp:
                 continue
 
             mode = self.var_mode.get()
-            self._status(f"掃描({mode})", '#f5a623')
+            if getattr(self, '_last_status_text', '') != f"掃描({mode})":
+                self._status(f"掃描({mode})", '#f5a623')
+                self._last_status_text = f"掃描({mode})"
 
             # 掃描+攻擊一體化（碰到怪物瞬間就打）
             self._set_state(BotState.SCANNING)
@@ -3341,7 +3337,9 @@ class BotApp:
                 mx, my = mon
                 self._combat_monster = (mx, my)  # 記錄怪物位置（喝水後回來用）
                 no_monster_count = 0
-                self._status(f"戰鬥({mode})", ACC)
+                if getattr(self, '_last_status_text', '') != f"戰鬥({mode})":
+                    self._status(f"戰鬥({mode})", ACC)
+                    self._last_status_text = f"戰鬥({mode})"
 
                 # 遠程/定點/召喚模式的額外技能
                 if mode in ('定點', '純定點', '墮落之地'):
