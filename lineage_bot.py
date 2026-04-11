@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "18.2"
+BOT_VERSION = "18.3"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -2569,17 +2569,14 @@ class BotApp:
 
     def _tick(self):
         if self.running:
-            # 統計每 10 秒更新一次
+            self._stats()
+            # 每 3 分鐘自動存檔（防崩潰遺失設定）
             now = time.time()
-            if now - getattr(self, '_last_stats', 0) > 10:
-                self._stats()
-                self._last_stats = now
-            # 每 3 分鐘自動存檔
             if now - getattr(self, '_last_autosave', 0) > 180:
                 try: autosave(self)
                 except: pass
                 self._last_autosave = now
-        self.root.after(1000, self._tick)
+            self.root.after(1000,self._tick)
 
     # ═══ Bot 主循環 ═══
     def _get_minimap_pos(self, cx, cy, cw, ch):
@@ -2829,7 +2826,7 @@ class BotApp:
         else:
             # HP 無法讀取 → 定時喝水保底
             need_hp = now - timers['hp'] > self.var_hp_sec.get()
-        if self.var_hp_en.get() and need_hp and now - timers['hp'] > 2:
+        if self.var_hp_en.get() and need_hp and now - timers['hp'] > 4:
             k = self.var_hp_key.get()
             self._click_hotbar(cx, cy, cw, ch, k)
             timers['hp'] = now
@@ -2838,11 +2835,6 @@ class BotApp:
                 self.log(f"喝紅水({k}) HP={hp*100:.0f}%")
             else:
                 self.log(f"喝紅水({k}) 定時保底")
-            # 喝完水後重新讀 HP（避免下次讀到快捷欄位置的錯誤值）
-            time.sleep(0.5)
-            hp = bars.hp(None, cx, cy, cw, ch)
-            if hp >= 0:
-                self._prev_hp = hp
 
         # 藍水
         mp_thr = self.var_mp_thr.get() / 100
@@ -2850,7 +2842,7 @@ class BotApp:
             need_mp = mp < mp_thr
         else:
             need_mp = now - timers['mp'] > self.var_mp_sec.get()
-        if self.var_mp_en.get() and need_mp and now - timers['mp'] > 2:
+        if self.var_mp_en.get() and need_mp and now - timers['mp'] > 4:
             k = self.var_mp_key.get()
             self._click_hotbar(cx, cy, cw, ch, k)
             timers['mp'] = now
