@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "18.3"
+BOT_VERSION = "18.4"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -2807,10 +2807,9 @@ class BotApp:
             self._status("緊急回城", '#f5a623')
             time.sleep(10)  # 等回城完成
 
-        # 治癒術（HP 低於閾值 / OCR 關閉時定時施放）
-        heal_trigger = (hp >= 0 and hp < self.var_heal_thr.get() / 100) \
-                       or (bars._hp_max == 0 and now - timers['heal'] > self.var_heal_sec.get())
-        if self.var_heal_en.get() and heal_trigger and now - timers['heal'] > 3:
+        # 治癒術（只在 HP 確實讀到且低於閾值時施放）
+        if self.var_heal_en.get() and hp >= 0 and not hp_unknown \
+           and hp < self.var_heal_thr.get() / 100 and now - timers['heal'] > 3:
             k = self.var_heal_key.get()
             for _ in range(self.var_heal_n.get()):
                 self._click_hotbar(cx, cy, cw, ch, k, clicks=5)  # 法術類5下
@@ -2820,37 +2819,23 @@ class BotApp:
             self.log(f"治癒術({k}) HP={hp*100:.0f}%")
 
         # 紅水 — HP 已知用比例判斷，HP 未知用定時喝
+        # 紅水 — 只在 HP 確實讀到且低於閾值時喝（不定時喝）
         hp_thr = self.var_hp_thr.get() / 100
-        if hp >= 0 and not hp_unknown:
-            need_hp = hp < hp_thr
-        else:
-            # HP 無法讀取 → 定時喝水保底
-            need_hp = now - timers['hp'] > self.var_hp_sec.get()
-        if self.var_hp_en.get() and need_hp and now - timers['hp'] > 4:
+        if self.var_hp_en.get() and hp >= 0 and not hp_unknown and hp < hp_thr and now - timers['hp'] > 2:
             k = self.var_hp_key.get()
             self._click_hotbar(cx, cy, cw, ch, k)
             timers['hp'] = now
             self.pots += 1
-            if hp >= 0:
-                self.log(f"喝紅水({k}) HP={hp*100:.0f}%")
-            else:
-                self.log(f"喝紅水({k}) 定時保底")
+            self.log(f"喝紅水({k}) HP={hp*100:.0f}%")
 
-        # 藍水
+        # 藍水 — 同上
         mp_thr = self.var_mp_thr.get() / 100
-        if mp >= 0:
-            need_mp = mp < mp_thr
-        else:
-            need_mp = now - timers['mp'] > self.var_mp_sec.get()
-        if self.var_mp_en.get() and need_mp and now - timers['mp'] > 4:
+        if self.var_mp_en.get() and mp >= 0 and mp < mp_thr and now - timers['mp'] > 2:
             k = self.var_mp_key.get()
             self._click_hotbar(cx, cy, cw, ch, k)
             timers['mp'] = now
             self.mpots += 1
-            if mp >= 0:
-                self.log(f"喝藍水({k}) MP={mp*100:.0f}%")
-            else:
-                self.log(f"喝藍水({k}) 定時保底")
+            self.log(f"喝藍水({k}) MP={mp*100:.0f}%")
 
         # 多組喝水（按優先級：閾值高的先觸發）
         if hp >= 0 and not hp_unknown:
