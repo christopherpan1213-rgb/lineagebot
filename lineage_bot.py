@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "17.6"
+BOT_VERSION = "17.7"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -2729,13 +2729,17 @@ class BotApp:
                 hp = bars.hp(None, cx, cy, cw, ch)
                 if hp >= 0:
                     hp_unknown = False
-                    self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max, bar_type='hp')
-                else:
-                    # HP 讀不到，顯示「?」（用 root.after 避免跨執行緒 GUI 操作）
-                    self.root.after(0, lambda: self.hp_tl.config(text="無法讀取"))
+                    # 只在 HP 變化超過 2% 時才更新 GUI（減少 tkinter 壓力）
+                    prev_gui_hp = getattr(self, '_prev_gui_hp', -1)
+                    if abs(hp - prev_gui_hp) > 0.02:
+                        self._bar(self.hp_cv, self.hp_tl, hp, cur=bars._hp_cur, mx=bars._hp_max, bar_type='hp')
+                        self._prev_gui_hp = hp
                 mp = bars.mp(None, cx, cy, cw, ch)
                 if mp >= 0:
-                    self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max, bar_type='mp')
+                    prev_gui_mp = getattr(self, '_prev_gui_mp', -1)
+                    if abs(mp - prev_gui_mp) > 0.02:
+                        self._bar(self.mp_cv, self.mp_tl, mp, cur=bars._mp_cur, mx=bars._mp_max, bar_type='mp')
+                        self._prev_gui_mp = mp
 
                 # HP 急降即時反應（高寵/補血機跳過，100%→0%是誤判也跳過）
                 mode_now = self.var_mode.get()
