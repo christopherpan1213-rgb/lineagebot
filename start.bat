@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul 2>&1
-title 天堂Bot 啟動器 v16.3
+title 天堂Bot 啟動器 v17.7
 echo ========================================
 echo   天堂經典版 Bot 啟動器
 echo ========================================
@@ -33,7 +33,7 @@ powershell -Command ^
 :: ── 1. 更新 exe ──
 echo [1/2] 檢查程式更新...
 powershell -Command ^
-  "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; ^
+  "[Net.ServicePointManager]::SecurityProtool=[Net.SecurityProtocolType]::Tls12; ^
   try { ^
     $r = Invoke-RestMethod 'https://api.github.com/repos/christopherpan1213-rgb/lineagebot/releases/latest' -TimeoutSec 15; ^
     $asset = $r.assets | Where-Object { $_.name -eq 'LineageBot.exe' }; ^
@@ -71,24 +71,25 @@ powershell -Command ^
 
 echo.
 
-:: ── 2. 建立 config 資料夾 ──
+:: ── 2. 建立資料夾 ──
 if not exist "%BOT_DIR%config" mkdir "%BOT_DIR%config"
 
-:: ── 3. 啟動 ──
-echo [2/2] 啟動 Bot...
+:: ── 3. 啟動（崩潰自動重啟） ──
+echo [2/2] 啟動 Bot（崩潰會自動重啟）...
 echo ========================================
 echo.
 
 set "EXE_PATH=%BOT_DIR%LineageBot.exe"
+
+:loop
 if exist "%EXE_PATH%" (
-    echo   啟動 %EXE_PATH%
-    start "" "%EXE_PATH%"
+    echo   [%time%] 啟動 LineageBot.exe
+    "%EXE_PATH%"
+    echo   [%time%] 程式已關閉，10秒後自動重啟...
+    echo   （按 Ctrl+C 取消重啟）
+    timeout /t 10
+    goto loop
 ) else (
     echo   找不到 LineageBot.exe！
-    echo   請確認檔案在: %BOT_DIR%
-    echo.
-    echo   嘗試用 Python 啟動...
-    python "%BOT_DIR%lineage_bot.py"
+    pause
 )
-
-timeout /t 3 >nul
