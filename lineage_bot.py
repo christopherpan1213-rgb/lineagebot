@@ -2,7 +2,7 @@
 天堂經典版 Bot v14 — 狀態機架構
 全 Interception 驅動 + OpenCV 怪物偵測 + DXcam 高速截圖 + 狀態機防衝突
 """
-BOT_VERSION = "17.7"
+BOT_VERSION = "17.8"
 GITHUB_REPO = "christopherpan1213-rgb/lineagebot"
 UPDATE_BRANCH = "main"
 import ctypes, ctypes.wintypes
@@ -2545,6 +2545,7 @@ class BotApp:
         else:
             self.running=True;self.t0=time.time();self.bot_state=BotState.IDLE;self._status("運行中",'#27ae60');self.log("Bot 啟動")
             self._last_activity = time.time()
+            autosave(self)  # 啟動時立刻存一次設定
             skills.setup([(self.var_sk[i].get(),self.var_cd[i].get()) for i in range(7)])
             if not self.thread or not self.thread.is_alive():
                 self.thread=threading.Thread(target=self._loop,daemon=True);self.thread.start()
@@ -2567,7 +2568,15 @@ class BotApp:
         self.root.after(5000, self._watchdog)  # 每 5 秒檢查一次
 
     def _tick(self):
-        if self.running:self._stats();self.root.after(1000,self._tick)
+        if self.running:
+            self._stats()
+            # 每 3 分鐘自動存檔（防崩潰遺失設定）
+            now = time.time()
+            if now - getattr(self, '_last_autosave', 0) > 180:
+                try: autosave(self)
+                except: pass
+                self._last_autosave = now
+            self.root.after(1000,self._tick)
 
     # ═══ Bot 主循環 ═══
     def _get_minimap_pos(self, cx, cy, cw, ch):
